@@ -1,5 +1,5 @@
 {
-  "name": "@allus/company-data",
+  "name": "@allus-fyi/company-data",
   "version": "0.0.3",
   "description": "TypeScript/Node SDK for the allus company-data API: typed, plaintext, slug-keyed conclusions with transparent decryption.",
   "license": "MIT",
