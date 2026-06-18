@@ -97,6 +97,7 @@ class Change {
   id: string;                 // the stable server change-row id — YOUR dedup key
   event: string;              // see the event table
   personId: string | null;
+  shareCode: string | null;   // the person's profile share code (every event; may be null)
   slug: string | null;        // field_updated/field_deleted/consent_* only
   value: unknown;             // field_updated only; typed exactly like Value.value
   live: boolean | null;       // field_updated only

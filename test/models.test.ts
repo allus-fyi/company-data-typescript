@@ -198,3 +198,16 @@ test('log entries parsed', () => {
   assert.ok(logs[1].at instanceof Date);
   assert.equal(logs[1].raw, body.items[1]);
 });
+
+test('change includes share_code', () => {
+  // Every change event carries the person's profile share_code (nullable).
+  const body = {
+    changes: [
+      { id: 'chg-1', event: 'connection_created', person_user_id: 'person-1', share_code: 'ABC123', at: '2026-06-17T12:00:00Z' },
+      { id: 'chg-2', event: 'connection_created', person_user_id: 'person-2', at: '2026-06-17T12:00:00Z' }, // no share_code -> null
+    ],
+  };
+  const changes = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  assert.equal(changes[0].shareCode, 'ABC123');
+  assert.equal(changes[1].shareCode, null);
+});
