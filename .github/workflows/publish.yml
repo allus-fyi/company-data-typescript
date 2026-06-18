@@ -3,12 +3,15 @@ on: { push: { tags: ['v*'] } }
 jobs:
   npm:
     runs-on: ubuntu-latest
-    permissions: { id-token: write }
+    # OIDC trusted publishing — no NPM_TOKEN. Configure the trusted publisher on
+    # npmjs.com (package → Settings → Trusted Publisher → GitHub Actions:
+    # owner allus-fyi, repo company-data-typescript, workflow publish.yml).
+    permissions: { id-token: write, contents: read }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20', registry-url: 'https://registry.npmjs.org' }
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance --access public
-        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
+      - run: npm publish --access public  # OIDC auth + automatic provenance (no token, no --provenance)
