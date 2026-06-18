@@ -8,7 +8,7 @@
  *     RequestField { slug, label, type, oneTime, mandatory }   // YOUR request config
  *     Connection   { id, personId, displayName, connectedAt, values: {<slug>: Value} }
  *     Value        { value, live, updatedAt }
- *     Change       { id, event, personId, slug?, value?, live?, at }   // id = stable dedup key
+ *     Change       { id, event, personId, shareCode?, slug?, value?, live?, at }   // id = stable dedup key
  *     LogEntry     { type, message, metadata, at }
  *
  * Typed values:
@@ -264,6 +264,8 @@ export class Change {
     readonly id: string,
     readonly event: string,
     readonly personId: string | null,
+    /** The person's profile share code (present on every event; may be null). */
+    readonly shareCode: string | null,
     readonly slug: string | null,
     readonly value: unknown,
     readonly live: boolean | null,
@@ -294,10 +296,12 @@ export class Change {
     }
 
     const personIdRaw = obj['person_user_id'] ?? obj['person_id'];
+    const shareCodeRaw = obj['share_code'];
     return new Change(
       String(obj['id'] ?? ''),
       event,
       personIdRaw != null ? String(personIdRaw) : null,
+      shareCodeRaw != null ? String(shareCodeRaw) : null,
       slug,
       value,
       live,
