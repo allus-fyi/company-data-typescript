@@ -1,4 +1,4 @@
-# @allus/company-data (TypeScript / Node)
+# @allus-fyi/company-data (TypeScript / Node)
 
 The TypeScript/Node SDK for the **allus company-data API**. Point it at a JSON
 config file and it hands back typed, plaintext, **your-slug-keyed conclusions**:
@@ -27,7 +27,7 @@ the request slots you configured.
 ## TL;DR — fetch new updates
 
 ```bash
-npm install @allus/company-data
+npm install @allus-fyi/company-data
 ```
 
 Point a config.json at your service keys:
@@ -46,7 +46,7 @@ Point a config.json at your service keys:
 Drain everything new, handled one update at a time:
 
 ```ts
-import { Client } from '@allus/company-data';
+import { Client } from '@allus-fyi/company-data';
 
 const client = Client.fromConfig('config.json');
 
@@ -75,17 +75,17 @@ Requires **Node ≥ 18** (it uses the built-in global `fetch` and `node:crypto`)
 The package ships **dual ESM + CommonJS** with bundled `.d.ts` types.
 
 ```bash
-npm install @allus/company-data
+npm install @allus-fyi/company-data
 # or, working from this repo:  npm install && npm run build   # from sdks/typescript/
 ```
 
 ```ts
 // ESM
-import { Client } from '@allus/company-data';
+import { Client } from '@allus-fyi/company-data';
 ```
 ```js
 // CommonJS
-const { Client } = require('@allus/company-data');
+const { Client } = require('@allus-fyi/company-data');
 ```
 
 ### 1. Write a config file
@@ -141,7 +141,7 @@ fast.
 ### 2. First call — list a connection's values
 
 ```ts
-import { Client } from '@allus/company-data';
+import { Client } from '@allus-fyi/company-data';
 
 const client = Client.fromConfig('allus.json');
 
@@ -344,7 +344,7 @@ client.handleWebhook(rawBody, headers): Change   // verify + parse
 > they are sync).
 
 The same three are importable as standalone functions
-(`import { verifyWebhook, parseWebhook, handleWebhook } from '@allus/company-data'`),
+(`import { verifyWebhook, parseWebhook, handleWebhook } from '@allus-fyi/company-data'`),
 which take the `config` and the decrypt/type closures explicitly — but inside an
 app you'll almost always use the client methods. See [Webhooks](#webhooks).
 
@@ -352,7 +352,7 @@ app you'll almost always use the client methods. See [Webhooks](#webhooks).
 
 ## The typed value model
 
-You work with these objects and nothing else (`import { … } from '@allus/company-data'`):
+You work with these objects and nothing else (`import { … } from '@allus-fyi/company-data'`):
 
 ```text
 RequestField { slug, label, type, oneTime, mandatory }     // YOUR request config
@@ -479,7 +479,7 @@ loop, a worker queue, whatever fits. The feed is cheap to poll (see
 ### Worked example
 
 ```ts
-import { Client } from '@allus/company-data';
+import { Client } from '@allus-fyi/company-data';
 
 const client = Client.fromConfig('allus.json');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -536,7 +536,7 @@ parsed body, the HMAC is over the exact bytes the platform sent.
 
 ```ts
 import express from 'express';
-import { Client, WebhookError } from '@allus/company-data';
+import { Client, WebhookError } from '@allus-fyi/company-data';
 
 const app = express();
 const client = Client.fromConfig('allus.json');
@@ -613,7 +613,7 @@ If you catch a `RateLimitError`, its `.retryAfter` is the seconds to wait (or
 
 ## Errors
 
-All from `@allus/company-data`. Same taxonomy + names across all six SDKs.
+All from `@allus-fyi/company-data`. Same taxonomy + names across all six SDKs.
 Every error extends `AllusError`, so `catch (e) { if (e instanceof AllusError) … }`
 captures the whole taxonomy.
 
@@ -630,7 +630,7 @@ captures the whole taxonomy.
 import {
   Client, AllusError, ConfigError, AuthError, ApiError,
   DecryptError, WebhookError, RateLimitError,
-} from '@allus/company-data';
+} from '@allus-fyi/company-data';
 
 try {
   const client = Client.fromConfig('allus.json');
