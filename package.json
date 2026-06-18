@@ -2,7 +2,7 @@
   "name": "@allus/company-data",
   "version": "0.1.0",
   "description": "TypeScript/Node SDK for the allus company-data API: typed, plaintext, slug-keyed conclusions with transparent decryption.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "author": "allme.fyi",
   "keywords": [
     "allus",
