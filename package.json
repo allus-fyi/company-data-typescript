@@ -10,13 +10,13 @@
     "company-data",
     "sdk"
   ],
-  "homepage": "https://github.com/allus/company-data-typescript#readme",
+  "homepage": "https://github.com/allus-fyi/company-data-typescript#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/allus/company-data-typescript.git"
+    "url": "git+https://github.com/allus-fyi/company-data-typescript.git"
   },
   "bugs": {
-    "url": "https://github.com/allus/company-data-typescript/issues"
+    "url": "https://github.com/allus-fyi/company-data-typescript/issues"
   },
   "type": "module",
   "engines": {
