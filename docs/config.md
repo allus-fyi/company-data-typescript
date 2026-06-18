@@ -1,6 +1,6 @@
 # Config reference
 
-`Config` (`import { Config } from '@allus/company-data'`).
+`Config` (`import { Config } from '@allus-fyi/company-data'`).
 
 A single JSON file holds the whole SDK configuration. **Config-only key handling is
 a hard rule:** no SDK method ever takes a key, passphrase, or secret as an argument
@@ -40,7 +40,7 @@ Config.fromEnv():              Config      // build entirely from ALLUS_* env va
 In practice you build the client directly:
 
 ```ts
-import { Client } from '@allus/company-data';
+import { Client } from '@allus-fyi/company-data';
 const client = Client.fromConfig('allus.json');   // == new Client(Config.fromFile('allus.json'))
 const client2 = Client.fromEnv();                  // == new Client(Config.fromEnv())
 ```

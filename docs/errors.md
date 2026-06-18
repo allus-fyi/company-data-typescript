@@ -1,12 +1,12 @@
 # Error model
 
 Same taxonomy + names across all six SDKs. All importable from
-`@allus/company-data`. Every error extends a common `AllusError` base.
+`@allus-fyi/company-data`. Every error extends a common `AllusError` base.
 
 ```ts
 import {
   AllusError, ConfigError, AuthError, ApiError, DecryptError, WebhookError, RateLimitError,
-} from '@allus/company-data';
+} from '@allus-fyi/company-data';
 ```
 
 | Error | Thrown when |
@@ -71,7 +71,7 @@ If you catch it, wait `err.retryAfter` (or a default) before retrying.
 import {
   Client, ConfigError, AuthError, ApiError,
   DecryptError, WebhookError, RateLimitError,
-} from '@allus/company-data';
+} from '@allus-fyi/company-data';
 
 try {
   const client = Client.fromConfig('allus.json');

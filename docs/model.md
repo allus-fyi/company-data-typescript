@@ -1,7 +1,7 @@
 # Output model reference
 
 The conclusions — the only objects you work with. Importable from
-`@allus/company-data`. Each carries `.raw` (the underlying hardened API object;
+`@allus-fyi/company-data`. Each carries `.raw` (the underlying hardened API object;
 never contains the person's source field).
 
 ## `RequestField`

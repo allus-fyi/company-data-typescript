@@ -11,8 +11,8 @@
  * buffer + pump), the `Client` facade, and the webhook receiver helpers. `Client`
  * is the one object an integrating company touches.
  *
- * Both ESM (`import { Client } from '@allus/company-data'`) and CommonJS
- * (`const { Client } = require('@allus/company-data')`) are supported via the
+ * Both ESM (`import { Client } from '@allus-fyi/company-data'`) and CommonJS
+ * (`const { Client } = require('@allus-fyi/company-data')`) are supported via the
  * package's `exports` map.
  */
 
@@ -77,4 +77,4 @@ export type { Headers } from './webhooks.js';
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.0.4'; // keep in sync with package.json
