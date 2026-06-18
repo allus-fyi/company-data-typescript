@@ -38,7 +38,7 @@ decrypt/type closures explicitly — used by `Client` internally; you'll normall
 the client methods inside an app.
 
 ```ts
-import { verifyWebhook, parseWebhook, handleWebhook } from '@allus/company-data';
+import { verifyWebhook, parseWebhook, handleWebhook } from '@allus-fyi/company-data';
 
 verifyWebhook(rawBody, headers, config): boolean
 parseWebhook(rawBody, headers, config, { typeForSlug, decryptValue, binaryFetch?, accountKey? }): Change
@@ -51,7 +51,7 @@ handleWebhook(rawBody, headers, config, { typeForSlug, decryptValue, binaryFetch
 
 ```ts
 import express from 'express';
-import { Client, WebhookError } from '@allus/company-data';
+import { Client, WebhookError } from '@allus-fyi/company-data';
 
 const app = express();
 const client = Client.fromConfig('allus.json');
@@ -78,7 +78,7 @@ app.post('/allus/webhook', express.raw({ type: '*/*' }), (req, res) => {
 
 ```ts
 import Fastify from 'fastify';
-import { Client, WebhookError } from '@allus/company-data';
+import { Client, WebhookError } from '@allus-fyi/company-data';
 
 const app = Fastify();
 const client = Client.fromConfig('allus.json');
