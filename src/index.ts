@@ -22,7 +22,7 @@ export type { ClientOptions } from './client.js';
 
 // config
 export { Config, SINGLE_WEBHOOK_KEY } from './config.js';
-export type { WireFormat } from './config.js';
+export type { WireFormat, WebhookBasic, WebhookHeader, WebhookAuthMethod } from './config.js';
 
 // crypto
 export { loadPrivateKey, decrypt, BinaryHandle, GCM_IV_LEN, GCM_TAG_LEN } from './crypto.js';

@@ -11,6 +11,10 @@
  *     by a `{"_enc":1,...}` envelope encrypted to the company **account** key (and
  *     the HMAC is then over that envelope — it is the final body that was sent).
  *
+ * Webhook delivery auth is per-webhook and may be any of five methods (hmac,
+ * bearer, basic, custom header, or none); {@link verifyWebhook} dispatches on the
+ * single method configured in {@link Config} ({@link Config.webhookAuthMethod}).
+ *
  * All secrets/keys come from {@link Config}. **These helpers take NO key or secret
  * arguments** — only the raw body, the headers, the config, and (for value typing)
  * the same decrypt/type closures the {@link Client} already holds.
@@ -82,16 +86,51 @@ function asBytes(rawBody: Buffer | Uint8Array | string): Buffer {
 // ── verify ─────────────────────────────────────────────────────────────────────
 
 /**
- * Verify the `X-Allus-Signature` HMAC over the raw body.
+ * Verify a webhook against the SINGLE configured auth method.
  *
- * Reads `X-Allus-Webhook-Id`, looks up that webhook's HMAC secret in config
- * (falling back to the single-webhook shortcut), recomputes
- * `HMAC-SHA256(rawBody, secret)` as hex, and constant-time-compares it to the
- * `X-Allus-Signature` header. Returns `false` on a missing signature,
- * unknown/unconfigured webhook id, or mismatch — never throws for a bad signature
- * (that is {@link handleWebhook}'s job). The HMAC is over the exact raw bytes.
+ * Mirrors the platform's per-webhook delivery auth (one method per webhook):
+ *
+ *   - `hmac`   — recompute `HMAC-SHA256(rawBody, secret)` (secret selected by
+ *     `X-Allus-Webhook-Id`) and constant-time-compare to `X-Allus-Signature`.
+ *   - `bearer` — `Authorization` equals `Bearer <token>`.
+ *   - `basic`  — `Authorization` equals `Basic <base64(user:pass)>`.
+ *   - `header` — the configured custom header equals the configured value.
+ *   - `none`   — always `true` (explicit opt-out).
+ *
+ * All comparisons are constant-time. Returns `false` on a missing/mismatched
+ * credential, or when no method is configured — never throws for a bad credential
+ * (that is {@link handleWebhook}'s job). Which method is used is decided entirely
+ * by config ({@link Config.webhookAuthMethod}); config loading guarantees at most
+ * one is set. The HMAC is over the exact raw bytes.
  */
 export function verifyWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers, config: Config): boolean {
+  const method = config.webhookAuthMethod();
+  if (method === null) return false;
+  if (method === 'none') return true;
+
+  if (method === 'bearer') {
+    const got = header(headers, 'authorization');
+    if (got === null) return false;
+    return constantTimeStringEqual(got, 'Bearer ' + (config.webhookBearerToken ?? ''));
+  }
+
+  if (method === 'basic') {
+    const got = header(headers, 'authorization');
+    if (got === null) return false;
+    const basic = config.webhookBasic!;
+    const creds = `${basic.username}:${basic.password}`;
+    const token = Buffer.from(creds, 'utf8').toString('base64');
+    return constantTimeStringEqual(got, 'Basic ' + token);
+  }
+
+  if (method === 'header') {
+    const hdr = config.webhookHeader!;
+    const got = header(headers, hdr.name);
+    if (got === null) return false;
+    return constantTimeStringEqual(got, hdr.value);
+  }
+
+  // method === 'hmac'
   const body = asBytes(rawBody);
   const signature = header(headers, HDR_SIGNATURE);
   if (!signature) return false;
@@ -101,11 +140,11 @@ export function verifyWebhook(rawBody: Buffer | Uint8Array | string, headers: He
   if (!secret) return false;
 
   const expected = createHmac('sha256', secret).update(body).digest('hex');
-  return constantTimeHexEqual(expected, signature.trim().toLowerCase());
+  return constantTimeStringEqual(expected, signature.trim().toLowerCase());
 }
 
-/** Constant-time compare two hex strings (length-safe). */
-function constantTimeHexEqual(a: string, b: string): boolean {
+/** Constant-time compare two UTF-8 strings (length-safe). */
+function constantTimeStringEqual(a: string, b: string): boolean {
   // Compare fixed-length byte buffers; if lengths differ, compare against `a`
   // itself so we never short-circuit on a length mismatch (timing-safe).
   const ab = Buffer.from(a, 'utf8');

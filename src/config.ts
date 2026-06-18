@@ -53,6 +53,21 @@ const VALID_FORMATS: readonly WireFormat[] = ['json', 'xml'];
 /** Reserved webhook-map key under which a flat `webhook_secret` is stored. */
 export const SINGLE_WEBHOOK_KEY = '__single__';
 
+/** HTTP Basic webhook-auth credentials ({@link Config.webhookBasic}). */
+export interface WebhookBasic {
+  username: string;
+  password: string;
+}
+
+/** Custom-header webhook auth ({@link Config.webhookHeader}). */
+export interface WebhookHeader {
+  name: string;
+  value: string;
+}
+
+/** The single configured webhook auth method, if any. */
+export type WebhookAuthMethod = 'hmac' | 'bearer' | 'basic' | 'header' | 'none';
+
 interface ConfigInit {
   apiUrl: string;
   clientId: string;
@@ -62,6 +77,10 @@ interface ConfigInit {
   accountPrivateKey?: string | null;
   accountPassphrase?: string | null;
   webhooks?: Record<string, string>;
+  webhookBearerToken?: string | null;
+  webhookBasic?: WebhookBasic | null;
+  webhookHeader?: WebhookHeader | null;
+  webhookAuthNone?: boolean;
   cacheDir?: string;
   format?: WireFormat;
 }
@@ -83,6 +102,15 @@ export class Config {
   // "webhook_secret" shortcut, captured under SINGLE_WEBHOOK_KEY.
   readonly webhooks: Record<string, string>;
 
+  // OPTIONAL — alternative webhook auth methods, mirroring the platform's
+  // per-webhook delivery auth. Configure AT MOST ONE family among
+  // hmac (webhooks/webhook_secret) | bearer | basic | header | none;
+  // two or more → ConfigError. See webhookAuthMethod().
+  readonly webhookBearerToken: string | null; // "Authorization: Bearer <token>"
+  readonly webhookBasic: WebhookBasic | null; // {username,password} → Basic auth
+  readonly webhookHeader: WebhookHeader | null; // {name,value} → custom header
+  readonly webhookAuthNone: boolean; // explicit opt-out — verify always true
+
   // Durable local buffer for the changes pump.
   readonly cacheDir: string;
 
@@ -101,6 +129,10 @@ export class Config {
     this.accountPrivateKey = init.accountPrivateKey ?? null;
     this.accountPassphrase = init.accountPassphrase ?? null;
     this.webhooks = init.webhooks ?? {};
+    this.webhookBearerToken = init.webhookBearerToken ?? null;
+    this.webhookBasic = init.webhookBasic ?? null;
+    this.webhookHeader = init.webhookHeader ?? null;
+    this.webhookAuthNone = init.webhookAuthNone ?? false;
     this.cacheDir = init.cacheDir ?? './allus-cache';
     this.format = init.format ?? 'json';
   }
@@ -169,6 +201,48 @@ export class Config {
     if (flatSecret !== undefined && flatSecret !== null) {
       webhooks[SINGLE_WEBHOOK_KEY] = String(flatSecret);
     }
+    const hasWebhooks = Object.keys(webhooks).length > 0;
+
+    // Alternative webhook auth methods (file-config only; no env overrides).
+    // Validate object shapes.
+    let webhookBearerToken: string | null = null;
+    const bearer = data['webhook_bearer_token'];
+    if (bearer) {
+      webhookBearerToken = String(bearer);
+    }
+
+    let webhookBasic: WebhookBasic | null = null;
+    const basic = data['webhook_basic'];
+    if (basic !== undefined && basic !== null) {
+      const b = basic as Record<string, unknown>;
+      if (typeof basic !== 'object' || Array.isArray(basic) || !b['username'] || !b['password']) {
+        throw new ConfigError('"webhook_basic" must be an object with non-empty "username" and "password"');
+      }
+      webhookBasic = { username: String(b['username']), password: String(b['password']) };
+    }
+
+    let webhookHeader: WebhookHeader | null = null;
+    const hdr = data['webhook_header'];
+    if (hdr !== undefined && hdr !== null) {
+      const h = hdr as Record<string, unknown>;
+      if (typeof hdr !== 'object' || Array.isArray(hdr) || !h['name'] || !h['value']) {
+        throw new ConfigError('"webhook_header" must be an object with non-empty "name" and "value"');
+      }
+      webhookHeader = { name: String(h['name']), value: String(h['value']) };
+    }
+
+    const webhookAuthNone = data['webhook_auth_none'] === true;
+
+    // At most one webhook auth method may be configured.
+    const present: string[] = [];
+    if (hasWebhooks) present.push('hmac');
+    if (webhookBearerToken) present.push('bearer');
+    if (webhookBasic) present.push('basic');
+    if (webhookHeader) present.push('header');
+    if (webhookAuthNone) present.push('none');
+    if (present.length > 1) {
+      throw new ConfigError('configure at most one webhook auth method (found: ' + present.join(', ') + ')');
+    }
 
     // Required fields (fail fast). Report by the config-file key
     // (snake_case) so the message is actionable for whoever wrote the file.
@@ -198,7 +272,11 @@ export class Config {
       keyPassphrase: String(values['keyPassphrase']),
       accountPrivateKey: values['accountPrivateKey'] !== undefined ? String(values['accountPrivateKey']) : null,
       accountPassphrase: values['accountPassphrase'] !== undefined ? String(values['accountPassphrase']) : null,
-      webhooks: Object.keys(webhooks).length > 0 ? webhooks : {},
+      webhooks: hasWebhooks ? webhooks : {},
+      webhookBearerToken,
+      webhookBasic,
+      webhookHeader,
+      webhookAuthNone,
       cacheDir: values['cacheDir'] !== undefined ? String(values['cacheDir']) : './allus-cache',
       format,
     });
@@ -216,5 +294,21 @@ export class Config {
       return this.webhooks[webhookId];
     }
     return this.webhooks[SINGLE_WEBHOOK_KEY] ?? null;
+  }
+
+  /**
+   * The single configured webhook auth method, or `null` if none is set.
+   *
+   * Returns one of `"hmac" | "bearer" | "basic" | "header" | "none"`. Config
+   * loading guarantees at most one is configured, so the order here is only a
+   * tie-break that never triggers.
+   */
+  webhookAuthMethod(): WebhookAuthMethod | null {
+    if (this.webhookAuthNone) return 'none';
+    if (this.webhookBearerToken) return 'bearer';
+    if (this.webhookBasic) return 'basic';
+    if (this.webhookHeader) return 'header';
+    if (Object.keys(this.webhooks).length > 0) return 'hmac';
+    return null;
   }
 }

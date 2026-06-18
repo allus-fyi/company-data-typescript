@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { Client, Config, HttpClient, WebhookError, decrypt, handleWebhook, parseWebhook, verifyWebhook } from '../src/index.js';
+import { Client, Config, ConfigError, HttpClient, WebhookError, decrypt, handleWebhook, parseWebhook, verifyWebhook } from '../src/index.js';
 import type { EncWrapper, Headers, HttpResponse, HttpTransport } from '../src/index.js';
 import { loadVector, loadVectorPrivateKey } from './helpers.js';
 
@@ -359,5 +359,123 @@ test('parseWebhook loads account key when not supplied (standalone)', () => {
     const change = parseWebhook(body, headers(body), config, { typeForSlug, decryptValue }); // no accountKey dep → loaded on demand
     assert.equal(change.id, 'chg-1');
     assert.equal(change.value, vector.text.plaintext);
+  });
+});
+
+// ── alternative webhook auth methods (bearer / basic / header / none) ────────────
+
+/** Minimal Config carrying one alt-auth field (verify never reads the PEM here). */
+function authCfg(extra: Partial<{
+  webhookBearerToken: string;
+  webhookBasic: { username: string; password: string };
+  webhookHeader: { name: string; value: string };
+  webhookAuthNone: boolean;
+}> = {}): Config {
+  return new Config({
+    apiUrl: 'https://api.allme.fyi',
+    clientId: 'svc',
+    clientSecret: 's',
+    servicePrivateKey: 'unused.pem',
+    keyPassphrase: 'unused',
+    ...extra,
+  });
+}
+
+/** Write a full config file (+ any extra auth keys) and build it via Config.fromFile (the _build path). */
+function buildFromData(dir: string, extra: Record<string, unknown>): Config {
+  const pem = join(dir, 'k.pem');
+  writeFileSync(pem, vector.encrypted_private_key_pem, 'ascii');
+  const data: Record<string, unknown> = {
+    api_url: 'https://api.allme.fyi',
+    client_id: 'svc',
+    client_secret: 's',
+    service_private_key: pem,
+    key_passphrase: vector.passphrase,
+    ...extra,
+  };
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify(data), 'utf8');
+  return Config.fromFile(path);
+}
+
+test('verify bearer true', () => {
+  const cfg = authCfg({ webhookBearerToken: 'tok123' });
+  assert.equal(verifyWebhook(Buffer.from('{}'), { Authorization: 'Bearer tok123' }, cfg), true);
+});
+
+test('verify bearer false wrong token', () => {
+  const cfg = authCfg({ webhookBearerToken: 'tok123' });
+  assert.equal(verifyWebhook(Buffer.from('{}'), { Authorization: 'Bearer nope' }, cfg), false);
+});
+
+test('verify bearer false missing header', () => {
+  const cfg = authCfg({ webhookBearerToken: 'tok123' });
+  assert.equal(verifyWebhook(Buffer.from('{}'), {}, cfg), false);
+});
+
+test('verify basic true', () => {
+  const cfg = authCfg({ webhookBasic: { username: 'u', password: 'p' } });
+  const token = Buffer.from('u:p', 'utf8').toString('base64');
+  assert.equal(verifyWebhook(Buffer.from('{}'), { Authorization: 'Basic ' + token }, cfg), true);
+});
+
+test('verify basic false wrong password', () => {
+  const cfg = authCfg({ webhookBasic: { username: 'u', password: 'p' } });
+  const bad = Buffer.from('u:wrong', 'utf8').toString('base64');
+  assert.equal(verifyWebhook(Buffer.from('{}'), { Authorization: 'Basic ' + bad }, cfg), false);
+});
+
+test('verify header true case-insensitive name', () => {
+  const cfg = authCfg({ webhookHeader: { name: 'X-My-Auth', value: 'sekret' } });
+  assert.equal(verifyWebhook(Buffer.from('{}'), { 'x-my-auth': 'sekret' }, cfg), true);
+});
+
+test('verify header false wrong value', () => {
+  const cfg = authCfg({ webhookHeader: { name: 'X-My-Auth', value: 'sekret' } });
+  assert.equal(verifyWebhook(Buffer.from('{}'), { 'X-My-Auth': 'nope' }, cfg), false);
+});
+
+test('verify none always true', () => {
+  const cfg = authCfg({ webhookAuthNone: true });
+  assert.equal(verifyWebhook(Buffer.from('anything at all'), {}, cfg), true);
+});
+
+test('verify no method configured false', () => {
+  const cfg = authCfg();
+  assert.equal(verifyWebhook(Buffer.from('{}'), { Authorization: 'Bearer x' }, cfg), false);
+});
+
+test('config rejects two auth methods', () => {
+  withTmp((dir) => {
+    assert.throws(() => buildFromData(dir, { webhook_secret: 'h', webhook_bearer_token: 'b' }), ConfigError);
+  });
+});
+
+test('config rejects bearer plus none', () => {
+  withTmp((dir) => {
+    assert.throws(() => buildFromData(dir, { webhook_bearer_token: 'b', webhook_auth_none: true }), ConfigError);
+  });
+});
+
+test('config basic requires both fields', () => {
+  withTmp((dir) => {
+    assert.throws(() => buildFromData(dir, { webhook_basic: { username: 'u' } }), ConfigError);
+  });
+});
+
+test('config header requires both fields', () => {
+  withTmp((dir) => {
+    assert.throws(() => buildFromData(dir, { webhook_header: { name: 'X-H' } }), ConfigError);
+  });
+});
+
+test('config single method ok and method name', () => {
+  withTmp((dir) => {
+    const cfg = buildFromData(dir, { webhook_bearer_token: 'b' });
+    assert.equal(cfg.webhookAuthMethod(), 'bearer');
+    const cfg2 = buildFromData(dir, { webhook_secret: 'h' });
+    assert.equal(cfg2.webhookAuthMethod(), 'hmac');
+    const cfg3 = buildFromData(dir, { webhook_auth_none: true });
+    assert.equal(cfg3.webhookAuthMethod(), 'none');
   });
 });
