@@ -25,7 +25,15 @@ export { Config, SINGLE_WEBHOOK_KEY } from './config.js';
 export type { WireFormat, WebhookBasic, WebhookHeader, WebhookAuthMethod } from './config.js';
 
 // crypto
-export { loadPrivateKey, decrypt, BinaryHandle, GCM_IV_LEN, GCM_TAG_LEN } from './crypto.js';
+export {
+  loadPrivateKey,
+  loadPublicKey,
+  decrypt,
+  encryptForPublicKey,
+  BinaryHandle,
+  GCM_IV_LEN,
+  GCM_TAG_LEN,
+} from './crypto.js';
 export type { EncWrapper, BinaryFetch, DecryptWrapper } from './crypto.js';
 
 // errors
@@ -41,7 +49,7 @@ export {
 
 // transport
 export { HttpClient, FetchTransport } from './http.js';
-export type { HttpTransport, HttpResponse, HttpClientOptions, Sleep, Clock } from './http.js';
+export type { HttpTransport, HttpResponse, HttpClientOptions, RequestBody, Sleep, Clock } from './http.js';
 
 // output model
 export {
@@ -49,6 +57,7 @@ export {
   Connection,
   Value,
   Change,
+  Document,
   LogEntry,
   STRUCTURED_TYPES,
   BINARY_TYPES,

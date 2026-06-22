@@ -14,8 +14,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BinaryHandle, Client, Config, ConfigError, Connection, HttpClient, LogEntry, RequestField } from '../src/index.js';
-import type { HttpResponse, HttpTransport, EncWrapper } from '../src/index.js';
+import { BinaryHandle, Client, Config, ConfigError, Connection, Document, HttpClient, LogEntry, RequestField, decrypt, loadPrivateKey } from '../src/index.js';
+import type { HttpResponse, HttpTransport, RequestBody, EncWrapper } from '../src/index.js';
+import { createPublicKey } from 'node:crypto';
 import { encryptForKey, loadVector } from './helpers.js';
 
 const vector = loadVector();
@@ -36,18 +37,36 @@ class FakeResponse implements HttpResponse {
 }
 
 type Router = (url: string, params: Record<string, string | number> | undefined) => FakeResponse;
+/** A write-verb router: records and replies for POST/PUT/DELETE company-data calls. */
+type WriteRouter = (method: string, url: string, body: RequestBody | undefined) => FakeResponse;
 
 class RoutedTransport implements HttpTransport {
   posts: { url: string }[] = [];
   gets: { url: string; params: Record<string, string | number> | undefined }[] = [];
-  constructor(private readonly router: Router) {}
+  requests: { method: string; url: string; json?: unknown; data?: unknown }[] = [];
+  constructor(
+    private readonly router: Router,
+    private readonly writeRouter?: WriteRouter,
+  ) {}
   async post(url: string): Promise<HttpResponse> {
+    // The OAuth token POST goes through `post`; never through the company-data path.
     this.posts.push({ url });
     return new FakeResponse(200, { access_token: 'tok-1', token_type: 'Bearer', expires_in: 3600 });
   }
   async get(url: string, params: Record<string, string | number> | undefined): Promise<HttpResponse> {
     this.gets.push({ url, params });
     return this.router(url, params);
+  }
+  async request(
+    method: string,
+    url: string,
+    _params: Record<string, string | number> | undefined,
+    _headers: Record<string, string>,
+    body: RequestBody | undefined,
+  ): Promise<HttpResponse> {
+    this.requests.push({ method, url, json: body?.json, data: body?.raw });
+    if (this.writeRouter === undefined) return new FakeResponse(200, {});
+    return this.writeRouter(method, url, body);
   }
 }
 
@@ -73,6 +92,26 @@ function makeClient(config: Config, router: Router): { client: Client; transport
   const transport = new RoutedTransport(router);
   const http = new HttpClient(config, { transport });
   return { client: new Client(config, { http }), transport };
+}
+
+function makeClientRw(
+  config: Config,
+  router: Router,
+  writeRouter: WriteRouter,
+): { client: Client; transport: RoutedTransport } {
+  const transport = new RoutedTransport(router, writeRouter);
+  const http = new HttpClient(config, { transport });
+  return { client: new Client(config, { http }), transport };
+}
+
+const NO_GET: Router = (url) => {
+  throw new Error('unexpected GET ' + url);
+};
+
+/** The vector key's PUBLIC half as base64 SPKI/DER (what GET /api/keys returns). */
+function vectorPubSpkiB64(): string {
+  const priv = loadPrivateKey(vector.encrypted_private_key_pem, vector.passphrase);
+  return createPublicKey(priv).export({ type: 'spki', format: 'der' }).toString('base64');
 }
 
 const REQUEST_FIELDS_BODY = {
@@ -364,5 +403,210 @@ test('fromConfig bad passphrase is ConfigError', async () => {
       'utf8',
     );
     assert.throws(() => Client.fromConfig(cfg), ConfigError);
+  });
+});
+
+// ── company documents (write) ──────────────────────────────────────────────────
+
+test('createDocument broadcast json is plaintext (no key fetch)', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    let posted: RequestBody | undefined;
+    const { client, transport } = makeClientRw(config, NO_GET, (method, url, body) => {
+      assert.equal(method, 'POST');
+      assert.ok(url.endsWith('/documents'));
+      posted = body;
+      const value = (body?.json as Record<string, unknown>)['value'];
+      return new FakeResponse(201, {
+        id: 'd1', kind: 'document', name: 'Terms', description: null, status: 'active',
+        payload_kind: 'json', is_private: false, value, metadata: null, created_at: null, updated_at: null,
+      });
+    });
+    const doc = await client.createDocument({
+      name: 'Terms', payloadKind: 'json', jsonValue: { url: 'x', v: '1' }, status: 'active',
+    });
+    const sent = posted?.json as Record<string, unknown>;
+    assert.equal(sent['target'], null);
+    assert.deepEqual(sent['value'], { url: 'x', v: '1' }); // plaintext, no _enc
+    assert.equal(sent['is_private'], false);
+    assert.equal(doc.id, 'd1');
+    assert.equal(doc.status, 'active');
+    // No recipient key was fetched for a broadcast.
+    assert.ok(!transport.gets.some((g) => g.url.includes('/api/keys/')));
+  });
+});
+
+test('createDocument per-person encrypts for BOTH is_private values', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const spki = vectorPubSpkiB64();
+    const priv = loadPrivateKey(vector.encrypted_private_key_pem, vector.passphrase);
+
+    for (const isPrivate of [false, true]) {
+      let keysFetched = 0;
+      let captured: RequestBody | undefined;
+      const { client } = makeClientRw(
+        config,
+        (url) => {
+          assert.ok(url.endsWith('/api/keys/ABC123'));
+          keysFetched += 1;
+          return new FakeResponse(200, { public_key: spki });
+        },
+        (_method, _url, body) => {
+          captured = body;
+          const value = (body?.json as Record<string, unknown>)['value'];
+          return new FakeResponse(201, {
+            id: 'd2', kind: 'document', name: 'PP', description: null, status: 'active',
+            payload_kind: 'json', is_private: isPrivate, value, metadata: null, created_at: null, updated_at: null,
+          });
+        },
+      );
+      const doc = await client.createDocument({
+        name: 'PP', payloadKind: 'json', jsonValue: { plan: 'pro' },
+        connectionId: 'conn-1', shareCode: 'ABC123', isPrivate,
+      });
+      assert.equal(keysFetched, 1); // fetched the recipient key
+      const sent = captured?.json as Record<string, unknown>;
+      const val = sent['value'] as Record<string, unknown>;
+      assert.equal(val['_enc'], 1); // ENCRYPTED, any is_private
+      assert.ok(val['k'] && val['iv'] && val['d']);
+      assert.deepEqual(sent['target'], { connection_id: 'conn-1' });
+      assert.equal(sent['is_private'], isPrivate);
+      // round-trips through the SDK's own decrypt → the original plaintext
+      assert.deepEqual(JSON.parse(decrypt(val as EncWrapper, priv)), { plan: 'pro' });
+      assert.equal(doc.id, 'd2');
+    }
+  });
+});
+
+test('createDocument private broadcast throws ConfigError', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client } = makeClientRw(config, NO_GET, () => new FakeResponse(200, {}));
+    await assert.rejects(
+      () => client.createDocument({ name: 'x', payloadKind: 'json', jsonValue: { a: 1 }, isPrivate: true }),
+      ConfigError,
+    );
+  });
+});
+
+test('createDocument file broadcast uploads raw bytes', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client, transport } = makeClientRw(config, NO_GET, (_method, url) => {
+      if (url.endsWith('/documents')) {
+        return new FakeResponse(201, {
+          id: 'f1', kind: 'document', name: 'C', description: null, status: 'active',
+          payload_kind: 'file', is_private: false, value: { _pending: true }, metadata: null, created_at: null, updated_at: null,
+        });
+      }
+      assert.ok(url.endsWith('/documents/f1/file'));
+      return new FakeResponse(200, { id: 'f1' });
+    });
+    await client.createDocument({
+      name: 'C', payloadKind: 'file', fileBytes: Buffer.from('%PDF-1.4 x'), fileMime: 'application/pdf',
+    });
+    const reqs = transport.requests;
+    assert.ok(reqs[0].url.endsWith('/documents'));
+    assert.equal((reqs[0].json as Record<string, unknown>)['target'], null);
+    assert.ok(reqs[1].url.endsWith('/documents/f1/file'));
+    assert.deepEqual(Buffer.from(reqs[1].data as Uint8Array), Buffer.from('%PDF-1.4 x')); // raw plaintext bytes
+  });
+});
+
+test('createDocument file per-person uploads wrapper bytes', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const spki = vectorPubSpkiB64();
+    const priv = loadPrivateKey(vector.encrypted_private_key_pem, vector.passphrase);
+    const { client, transport } = makeClientRw(
+      config,
+      () => new FakeResponse(200, { public_key: spki }),
+      (_method, url) => {
+        if (url.endsWith('/documents')) {
+          return new FakeResponse(201, {
+            id: 'f2', kind: 'document', name: 'C', description: null, status: 'active',
+            payload_kind: 'file', is_private: true, value: { _pending: true }, metadata: null, created_at: null, updated_at: null,
+          });
+        }
+        return new FakeResponse(200, { id: 'f2' });
+      },
+    );
+    await client.createDocument({
+      name: 'C', payloadKind: 'file', fileBytes: Buffer.from('hello-bytes'), fileMime: 'application/pdf',
+      personUserId: 'u1', shareCode: 'ABC123', isPrivate: true,
+    });
+    const upload = transport.requests[1].data as Uint8Array;
+    assert.ok(Buffer.isBuffer(Buffer.from(upload)));
+    const wrapper = JSON.parse(Buffer.from(upload).toString('utf8'));
+    assert.equal(wrapper._enc, 1); // ciphertext wrapper bytes, not the raw file
+    // decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
+    const env = JSON.parse(decrypt(wrapper as EncWrapper, priv));
+    assert.ok((env.file as string).startsWith('data:application/pdf;base64,'));
+    assert.deepEqual(
+      Buffer.from((env.file as string).split(',', 2)[1], 'base64'),
+      Buffer.from('hello-bytes'),
+    );
+  });
+});
+
+test('document verbs hit the right verb + path', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const seen: Array<[string, string]> = [];
+    const { client } = makeClientRw(
+      config,
+      (url) => {
+        if (url.endsWith('/documents')) return new FakeResponse(200, { total: 0, items: [] });
+        if (url.includes('/documents/d9')) {
+          return new FakeResponse(200, { id: 'd9', payload_kind: 'json', is_private: false, value: { a: 1 } });
+        }
+        throw new Error('unexpected GET ' + url);
+      },
+      (method, url) => {
+        seen.push([method, url]);
+        return new FakeResponse(200, {
+          id: 'd9', payload_kind: 'json', is_private: false, value: { a: 1 }, status: 'ended',
+        });
+      },
+    );
+    assert.deepEqual(await client.listDocuments({ status: 'active' }), []);
+    assert.equal((await client.document('d9')).id, 'd9');
+    await client.updateDocumentStatus('d9', 'ended');
+    await client.updateDocumentMetadata('d9', { name: 'renamed' });
+    await client.deleteDocument('d9');
+
+    const methods = seen.map(([m, u]) => [m, u.split('/api/company-data')[1]] as [string, string]);
+    const puts = methods.filter(([m, u]) => m === 'PUT' && u === '/documents/d9');
+    assert.equal(puts.length, 2); // status + metadata
+    assert.ok(methods.some(([m, u]) => m === 'DELETE' && u === '/documents/d9'));
+  });
+});
+
+test('document_status_changed feed event parses into a Change', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    let served = false;
+    const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/request-fields')) return new FakeResponse(200, { request_fields: [] });
+      if (url.endsWith('/changes')) {
+        if (served) return new FakeResponse(200, { changes: [] });
+        served = true;
+        return new FakeResponse(200, {
+          changes: [
+            {
+              id: 'chg-doc', event: 'document_status_changed', person_user_id: 'u-1',
+              share_code: 'ABC123', document_id: 'doc-9', status: 'ended', at: '2026-06-22T10:00:00Z',
+            },
+          ],
+        });
+      }
+      throw new Error('unexpected GET ' + url);
+    });
+    const seen: Array<{ event: string; documentId: string | null; status: string | null }> = [];
+    await client.processChanges((c) => {
+      seen.push({ event: c.event, documentId: c.documentId, status: c.status });
+    });
+    assert.deepEqual(seen, [{ event: 'document_status_changed', documentId: 'doc-9', status: 'ended' }]);
   });
 });

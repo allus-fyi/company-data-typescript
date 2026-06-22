@@ -41,10 +41,16 @@ import { readFileSync } from 'node:fs';
 import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
-import { decrypt as cryptoDecrypt, loadPrivateKey, type EncWrapper } from './crypto.js';
-import { ConfigError, DecryptError, RateLimitError } from './errors.js';
+import {
+  decrypt as cryptoDecrypt,
+  encryptForPublicKey,
+  loadPrivateKey,
+  loadPublicKey,
+  type EncWrapper,
+} from './crypto.js';
+import { ApiError, ConfigError, DecryptError, RateLimitError } from './errors.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
-import { Change, Connection, LogEntry, RequestField } from './models.js';
+import { Change, Connection, Document, LogEntry, RequestField } from './models.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
 import { handleWebhook, loadAccountKey, parseWebhook, verifyWebhook, type Headers } from './webhooks.js';
@@ -55,11 +61,15 @@ const CONNECTIONS = `${BASE}/connections`;
 const CHANGES = `${BASE}/changes`;
 const REQUEST_FIELDS = `${BASE}/request-fields`;
 const LOGS = `${BASE}/logs`;
+const DOCUMENTS = `${BASE}/documents`;
+const KEYS = '/api/keys';
 
 // Default page size for the connections iterator. The endpoint is heavily
 // rate-limited, so we keep pages reasonably large to minimize the
 // number of requests for a full sync, while the iterator stays lazy.
 const DEFAULT_CONN_PAGE = 100;
+
+type Json = Record<string, unknown>;
 
 // Bounded extra backoff for the connections iterator on a surfaced 429. The
 // HttpClient already retries a 429 internally; if it still surfaces a
@@ -98,6 +108,10 @@ export class Client {
   private requestFieldsInFlight: Promise<RequestField[]> | null = null;
 
   private _pump: Pump | null = null;
+
+  // Recipient RSA public keys (by shareCode) — cached for per-person document
+  // encryption. A public key is immutable + not a secret (fetched live, never configured).
+  private pubKeyCache: Map<string, KeyObject> = new Map();
 
   constructor(config: Config, opts: ClientOptions = {}) {
     this.config = config;
@@ -394,6 +408,222 @@ export class Client {
       accountKey: this.accountKey, // cached once; no per-webhook PBKDF2
     });
   }
+
+  // ── company documents (write) ───────────────────────────────────────────────
+
+  /**
+   * Fetch + cache the recipient RSA public key by shareCode
+   * (`GET /api/keys/{shareCode}` → `{public_key:<b64 SPKI>}`).
+   */
+  private async recipientPublicKey(shareCode: string): Promise<KeyObject> {
+    const cached = this.pubKeyCache.get(shareCode);
+    if (cached !== undefined) return cached;
+    const body = await this.http.get(`${KEYS}/${shareCode}`);
+    const spki =
+      body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>)['public_key']
+        : null;
+    if (typeof spki !== 'string' || spki === '') {
+      throw new ApiError(0, 'keys.not_found', `no public_key for share_code ${shareCode}`);
+    }
+    const key = loadPublicKey(spki);
+    this.pubKeyCache.set(shareCode, key);
+    return key;
+  }
+
+  /**
+   * Resolve a target's shareCode (the recipient public-key handle).
+   *
+   * Prefers a single-connection fetch (carries `share_code`); falls back to a
+   * connections scan by `user_id`. Pass `shareCode` to skip this entirely.
+   */
+  private async resolveShareCode(
+    connectionId: string | undefined,
+    personUserId: string | undefined,
+  ): Promise<string> {
+    if (connectionId) {
+      const body = await this.http.get(`${CONNECTIONS}/${connectionId}`);
+      const sc =
+        body !== null && typeof body === 'object' && !Array.isArray(body)
+          ? (body as Record<string, unknown>)['share_code']
+          : null;
+      if (sc != null && String(sc) !== '') return String(sc);
+    }
+    if (personUserId) {
+      for await (const conn of this.connections()) {
+        const raw = conn.raw ?? {};
+        if (raw['user_id'] === personUserId || conn.personId === personUserId) {
+          const sc = raw['share_code'];
+          if (sc != null && String(sc) !== '') return String(sc);
+        }
+      }
+    }
+    throw new ConfigError(
+      'could not resolve a share_code for the target — pass shareCode explicitly',
+    );
+  }
+
+  /**
+   * Create a company document for a connection / person (PER-PERSON), or BROADCAST
+   * (no target).
+   *
+   * `payloadKind:'json'` → `jsonValue` (object). `payloadKind:'file'` → `fileBytes`
+   * (+ `fileMime`).
+   *
+   * Encryption is decided by the TARGET, not by is_private:
+   *   PER-PERSON (connectionId/personUserId given) → the value is ALWAYS encrypted FOR
+   *     THE RECIPIENT (shareCode resolved from connectionId/personUserId when not given)
+   *     before it leaves the process — for EVERY per-person doc, private or not. The
+   *     server stores ciphertext. NO key argument.
+   *   BROADCAST (no target) → the value is sent PLAINTEXT (you cannot single-key-encrypt
+   *     to all of a service's connections). A broadcast MUST be non-private (a plaintext
+   *     value cannot be locked); is_private therefore requires a per-person target.
+   *
+   * is_private is a DISPLAY-ONLY flag passed through to the API — it governs the
+   * recipient device's lock vs decrypt-on-load behaviour, NOT whether the value is
+   * encrypted.
+   */
+  async createDocument(opts: {
+    kind?: string;
+    name: string;
+    payloadKind: 'json' | 'file';
+    isPrivate?: boolean;
+    description?: string;
+    connectionId?: string;
+    personUserId?: string;
+    /** Recipient handle for per-person encryption (skips share-code resolution). */
+    shareCode?: string;
+    jsonValue?: unknown;
+    fileBytes?: Buffer | Uint8Array;
+    fileMime?: string;
+    metadata?: Json;
+    status?: string;
+  }): Promise<Document> {
+    const payloadKind = opts.payloadKind;
+    if (payloadKind !== 'json' && payloadKind !== 'file') {
+      throw new ConfigError("payloadKind must be 'json' or 'file'");
+    }
+
+    let target: Json | null = null;
+    if (opts.connectionId) {
+      target = { connection_id: opts.connectionId };
+    } else if (opts.personUserId) {
+      target = { person_user_id: opts.personUserId };
+    } // else: broadcast — target stays null
+
+    const perPerson = target !== null;
+    const isPrivate = Boolean(opts.isPrivate);
+    if (isPrivate && !perPerson) {
+      // A plaintext broadcast cannot be locked — is_private needs a per-person target.
+      throw new ConfigError('isPrivate requires a per-person target (broadcast is plaintext)');
+    }
+
+    let pubKey: KeyObject | null = null;
+    if (perPerson) {
+      // EVERY per-person doc is encrypted, private or not — fetch the recipient key.
+      const sc = opts.shareCode ?? (await this.resolveShareCode(opts.connectionId, opts.personUserId));
+      pubKey = await this.recipientPublicKey(sc);
+    }
+
+    const body: Json = {
+      kind: opts.kind ?? 'document',
+      name: opts.name,
+      payload_kind: payloadKind,
+      is_private: isPrivate,
+      target,
+    };
+    if (opts.description !== undefined) body['description'] = opts.description;
+    if (opts.metadata !== undefined) body['metadata'] = opts.metadata;
+    if (opts.status !== undefined) body['status'] = opts.status;
+
+    if (payloadKind === 'json') {
+      if (opts.jsonValue === undefined) {
+        throw new ConfigError("jsonValue is required for payloadKind='json'");
+      }
+      body['value'] = perPerson
+        ? encryptForPublicKey(JSON.stringify(opts.jsonValue), pubKey as KeyObject)
+        : opts.jsonValue;
+      const created = await this.http.post(DOCUMENTS, { json: body });
+      return Document.fromApi(docObj(created), { decryptValue: this.decryptValue });
+    }
+
+    // file: create the metadata row first, then upload bytes to /{id}/file.
+    if (opts.fileBytes === undefined) {
+      throw new ConfigError("fileBytes is required for payloadKind='file'");
+    }
+    const created = await this.http.post(DOCUMENTS, { json: body });
+    const doc = Document.fromApi(docObj(created), { decryptValue: this.decryptValue });
+    const fileBytes = Buffer.from(opts.fileBytes);
+    if (perPerson) {
+      // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string,
+      // then send the wrapper as bytes.
+      const envelope = JSON.stringify({ file: dataUri(fileBytes, opts.fileMime) });
+      const wrapper = encryptForPublicKey(envelope, pubKey as KeyObject);
+      await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
+        raw: Buffer.from(JSON.stringify(wrapper), 'utf8'),
+        contentType: 'application/json',
+      });
+    } else {
+      // Broadcast — raw plaintext bytes.
+      await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
+        raw: fileBytes,
+        contentType: opts.fileMime ?? 'application/octet-stream',
+      });
+    }
+    return doc;
+  }
+
+  /**
+   * List this service's documents → `Document[]` (paged; optional person/status filter).
+   */
+  async listDocuments(
+    opts: { personUserId?: string; status?: string; limit?: number; offset?: number } = {},
+  ): Promise<Document[]> {
+    const params: Record<string, string | number> = {
+      limit: Math.max(1, Math.trunc(opts.limit ?? 100)),
+      offset: Math.max(0, Math.trunc(opts.offset ?? 0)),
+    };
+    if (opts.personUserId) params['person_user_id'] = opts.personUserId;
+    if (opts.status) params['status'] = opts.status;
+    const body = await this.http.get(DOCUMENTS, params);
+    return Document.listFromApi(body, { decryptValue: this.decryptValue });
+  }
+
+  /** Fetch one document by id → {@link Document}. */
+  async document(documentId: string): Promise<Document> {
+    const body = await this.http.get(`${DOCUMENTS}/${documentId}`);
+    return Document.fromApi(docObj(body), { decryptValue: this.decryptValue });
+  }
+
+  /**
+   * Set a document's lifecycle status
+   * (offering|ready_to_sign|active|active_but_ending|ended).
+   */
+  async updateDocumentStatus(documentId: string, status: string): Promise<Document> {
+    const body = await this.http.put(`${DOCUMENTS}/${documentId}`, { json: { status } });
+    return Document.fromApi(docObj(body), { decryptValue: this.decryptValue });
+  }
+
+  /** Update a document's metadata / name / description. */
+  async updateDocumentMetadata(
+    documentId: string,
+    opts: { metadata?: Json; name?: string; description?: string },
+  ): Promise<Document> {
+    const payload: Json = {};
+    if (opts.metadata !== undefined) payload['metadata'] = opts.metadata;
+    if (opts.name !== undefined) payload['name'] = opts.name;
+    if (opts.description !== undefined) payload['description'] = opts.description;
+    if (Object.keys(payload).length === 0) {
+      throw new ConfigError('updateDocumentMetadata needs metadata, name, or description');
+    }
+    const body = await this.http.put(`${DOCUMENTS}/${documentId}`, { json: payload });
+    return Document.fromApi(docObj(body), { decryptValue: this.decryptValue });
+  }
+
+  /** Delete a document (and its on-disk file). */
+  async deleteDocument(documentId: string): Promise<void> {
+    await this.http.delete(`${DOCUMENTS}/${documentId}`);
+  }
 }
 
 // ── module-level helpers ──────────────────────────────────────────────────────
@@ -417,6 +647,28 @@ function loadServiceKey(config: Config): KeyObject {
     }
     throw exc;
   }
+}
+
+/**
+ * Pull the document object out of a create/get/update response.
+ *
+ * The API returns the bare document object; tolerate a `{"document": {...}}` wrapper too.
+ */
+function docObj(body: unknown): Json {
+  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    const inner = (body as Record<string, unknown>)['document'];
+    if (inner !== null && typeof inner === 'object' && !Array.isArray(inner)) {
+      return inner as Json;
+    }
+    return body as Json;
+  }
+  return {};
+}
+
+/** Build a `data:<mime>;base64,<…>` URI for the per-person file envelope. */
+function dataUri(fileBytes: Buffer, mime: string | undefined): string {
+  const b64 = fileBytes.toString('base64');
+  return `data:${mime ?? 'application/octet-stream'};base64,${b64}`;
 }
 
 /** Pull the `items` array out of a `{total, items}` list response. */
