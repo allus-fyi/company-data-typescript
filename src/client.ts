@@ -496,12 +496,20 @@ export class Client {
     jsonValue?: unknown;
     fileBytes?: Buffer | Uint8Array;
     fileMime?: string;
+    /** Contract: the person must sign (step-up). Forces a per-person target. */
+    requiresSignature?: boolean;
+    /** Contract: the person must accept. Forces a per-person target. */
+    requiresAcceptance?: boolean;
     metadata?: Json;
     status?: string;
   }): Promise<Document> {
     const payloadKind = opts.payloadKind;
     if (payloadKind !== 'json' && payloadKind !== 'file') {
       throw new ConfigError("payloadKind must be 'json' or 'file'");
+    }
+    const kind = opts.kind ?? 'document';
+    if (kind !== 'document' && kind !== 'agreement' && kind !== 'subscription') {
+      throw new ConfigError("kind must be 'document', 'agreement' or 'subscription'");
     }
 
     let target: Json | null = null;
@@ -513,6 +521,13 @@ export class Client {
 
     const perPerson = target !== null;
     const isPrivate = Boolean(opts.isPrivate);
+    const requiresSignature = Boolean(opts.requiresSignature);
+    const requiresAcceptance = Boolean(opts.requiresAcceptance);
+    // A contract (agreement/subscription, or either flag) is ALWAYS per-person → it must target one person.
+    const isContract = kind === 'agreement' || kind === 'subscription' || requiresSignature || requiresAcceptance;
+    if (isContract && !perPerson) {
+      throw new ConfigError('a contract must target one connected person');
+    }
     if (isPrivate && !perPerson) {
       // A plaintext broadcast cannot be locked — is_private needs a per-person target.
       throw new ConfigError('isPrivate requires a per-person target (broadcast is plaintext)');
@@ -526,10 +541,12 @@ export class Client {
     }
 
     const body: Json = {
-      kind: opts.kind ?? 'document',
+      kind,
       name: opts.name,
       payload_kind: payloadKind,
       is_private: isPrivate,
+      requires_signature: requiresSignature,
+      requires_acceptance: requiresAcceptance,
       target,
     };
     if (opts.description !== undefined) body['description'] = opts.description;

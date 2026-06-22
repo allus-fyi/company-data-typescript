@@ -273,6 +273,8 @@ export class Change {
     readonly documentId: string | null,
     /** Set on `document_status_changed` — the document's new lifecycle status. */
     readonly status: string | null,
+    /** Set on `document_status_changed` for a contract — signed | accepted | cancelled (else null). */
+    readonly action: string | null,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -303,6 +305,7 @@ export class Change {
     const shareCodeRaw = obj['share_code'];
     const documentIdRaw = obj['document_id'];
     const statusRaw = event === 'document_status_changed' ? obj['status'] : null;
+    const actionRaw = event === 'document_status_changed' ? obj['action'] : null;
     return new Change(
       String(obj['id'] ?? ''),
       event,
@@ -313,6 +316,7 @@ export class Change {
       live,
       documentIdRaw != null ? String(documentIdRaw) : null,
       statusRaw != null ? String(statusRaw) : null,
+      actionRaw != null ? String(actionRaw) : null,
       parseIsoDate(obj['at']),
       obj,
     );
@@ -356,6 +360,12 @@ export class Document {
     readonly metadata: Json | null,
     readonly createdAt: Date | null,
     readonly updatedAt: Date | null,
+    /** Contract: the person must sign. */
+    readonly requiresSignature: boolean,
+    /** Contract: the person must accept. */
+    readonly requiresAcceptance: boolean,
+    /** Contract sign/accept audit trail (company-side reads only). */
+    readonly signatures: Json[],
     private readonly decryptValue: DecryptWrapper | null,
     readonly raw: Json,
   ) {}
@@ -400,6 +410,9 @@ export class Document {
       metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata) ? (metadata as Json) : null,
       parseIsoDate(obj['created_at']),
       parseIsoDate(obj['updated_at']),
+      Boolean(coerceBool(obj['requires_signature'])),
+      Boolean(coerceBool(obj['requires_acceptance'])),
+      Array.isArray(obj['signatures']) ? (obj['signatures'] as Json[]) : [],
       opts.decryptValue ?? null,
       obj,
     );
