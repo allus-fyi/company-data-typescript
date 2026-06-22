@@ -258,6 +258,48 @@ test('change document_status_changed parses documentId + status', () => {
   assert.equal(chg.live, null);
 });
 
+test('change document_status_changed carries action for a contract', () => {
+  const body = {
+    changes: [
+      {
+        id: 'chg-sign',
+        event: 'document_status_changed',
+        person_user_id: 'u-2',
+        action: 'signed',
+        document_id: 'doc-7',
+        status: 'active',
+        at: '2026-06-22T10:00:00Z',
+      },
+    ],
+  };
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  assert.equal(chg.event, 'document_status_changed');
+  assert.equal(chg.action, 'signed');
+  assert.equal(chg.documentId, 'doc-7');
+  assert.equal(chg.status, 'active');
+  assert.equal(chg.slug, null);
+});
+
+test('Document carries contract flags + signatures', () => {
+  const doc = Document.fromApi({
+    id: 'c1',
+    kind: 'agreement',
+    name: 'Agreement',
+    status: 'active',
+    payload_kind: 'json',
+    is_private: false,
+    value: { v: 1 },
+    metadata: {},
+    requires_signature: true,
+    requires_acceptance: false,
+    signatures: [{ action: 'signed', method: 'biometric', content_sha256: 'ab'.repeat(32) }],
+  });
+  assert.equal(doc.requiresSignature, true);
+  assert.equal(doc.requiresAcceptance, false);
+  assert.equal(doc.signatures.length, 1);
+  assert.equal((doc.signatures[0] as Record<string, unknown>).action, 'signed');
+});
+
 test('Document broadcast json is plaintext (no decrypt needed)', () => {
   const doc = Document.fromApi({
     id: 'd1',

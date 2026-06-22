@@ -490,6 +490,28 @@ test('createDocument private broadcast throws ConfigError', async () => {
   });
 });
 
+test('createDocument contract without target throws ConfigError', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client } = makeClientRw(config, NO_GET, () => new FakeResponse(200, {}));
+    await assert.rejects(
+      () => client.createDocument({ name: 'Agreement', payloadKind: 'json', kind: 'agreement', requiresSignature: true, jsonValue: { a: 1 } }),
+      ConfigError,
+    );
+  });
+});
+
+test('createDocument invalid kind throws ConfigError', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client } = makeClientRw(config, NO_GET, () => new FakeResponse(200, {}));
+    await assert.rejects(
+      () => client.createDocument({ name: 'x', payloadKind: 'json', kind: 'invalid', jsonValue: { a: 1 } }),
+      ConfigError,
+    );
+  });
+});
+
 test('createDocument file broadcast uploads raw bytes', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
