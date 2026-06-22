@@ -419,9 +419,10 @@ A change-feed / webhook event.
 | Property | Meaning |
 |----------|---------|
 | `id` | **The stable server change-row id — your dedup key** (captured before the server delete). |
-| `event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`. |
+| `event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`, `document_status_changed`. |
 | `personId` | The person the change is about (may be `null`). |
-| `slug`, `value`, `live` | Present only on `field_updated`; `value` is typed exactly like `Value.value` (incl. a lazy `BinaryHandle` for binaries). Connection/consent events carry no slot/value. |
+| `slug`, `value`, `live` | Present only on `field_updated`; `value` is typed exactly like `Value.value` (incl. a lazy `BinaryHandle` for binaries). Connection/consent/document events carry no slot/value. |
+| `documentId`, `status` | Present only on `document_status_changed` — the affected document's id and its new lifecycle status. `null` on every other event. |
 | `at` | `Date` of the change. (There is no separate `updatedAt` on a change.) |
 
 ### `.raw`
@@ -590,6 +591,118 @@ then decrypt the inner field value with the service key — so an encrypted-payl
 > internally; you only supply the account key in config.
 
 See [`docs/webhooks.md`](docs/webhooks.md).
+
+---
+
+## Company documents
+
+A service can attach **documents** to a connection — contracts, statements,
+receipts, anything — either **broadcast** to every connection or aimed at **one
+person**. A document carries a small JSON payload (`payloadKind:'json'`) or a file
+blob (`payloadKind:'file'`), a `kind`/`name`/`description`, a lifecycle `status`,
+and free-form `metadata`.
+
+### The one rule: the *target* decides encryption, not `isPrivate`
+
+* **Per-person** (you pass `connectionId`, `personUserId`, **or** `shareCode`) →
+  the value is **always end-to-end encrypted to the recipient's public key** before
+  it leaves the process — for **every** per-person document, `isPrivate` or not. The
+  server only ever stores ciphertext. No method takes a key or secret argument; the
+  SDK resolves the recipient's share code (from `connectionId`/`personUserId`) and
+  fetches the key for you (pass `shareCode` to skip that lookup).
+* **Broadcast** (no target) → the value is sent **plaintext** (you can't single-key
+  encrypt to all of a service's connections), so a broadcast **must** be non-private.
+
+`isPrivate` is therefore **device-display-only** — it tells the recipient's app to
+*lock* the document (tap-to-reveal) vs *decrypt-on-load*; it does **not** change
+whether the value is encrypted. Because a plaintext broadcast can't be locked,
+`isPrivate: true` **with no target throws** `ConfigError`.
+
+### Create
+
+```ts
+// BROADCAST — plaintext json, visible to every connection (no target; non-private)
+const notice = await client.createDocument({
+  kind: 'notice',
+  name: 'August price update',
+  payloadKind: 'json',
+  jsonValue: { effective: '2026-08-01', changePct: 4 },
+});
+
+// PER-PERSON — automatically encrypted to the recipient (target by connectionId,
+// personUserId, or shareCode — any one resolves the key)
+const contract = await client.createDocument({
+  kind: 'contract',
+  name: 'Service agreement',
+  payloadKind: 'json',
+  connectionId: 'conn-uuid',          // or personUserId / shareCode
+  isPrivate: true,                    // device locks it; value is encrypted regardless
+  jsonValue: { plan: 'pro', signedBy: null },
+  status: 'ready_to_sign',
+  metadata: { ref: 'CT-2026-0042' },
+});
+
+// PER-PERSON FILE — bytes are encrypted to the recipient too
+const receipt = await client.createDocument({
+  kind: 'receipt',
+  name: 'Invoice 0042.pdf',
+  payloadKind: 'file',
+  personUserId: 'person-uuid',
+  fileBytes: pdfBuffer,              // Buffer | Uint8Array
+  fileMime: 'application/pdf',
+});
+```
+
+`payloadKind` selects the body: `'json'` requires `jsonValue` (any
+JSON-serialisable object); `'file'` requires `fileBytes` (and an optional
+`fileMime`). For per-person json docs, read the plaintext back with `.json()` —
+it decrypts transparently with the SDK's own key; broadcast json is already
+plaintext.
+
+### List, fetch, update, delete
+
+```ts
+listDocuments(opts?: { personUserId?; status?; limit?; offset? }): Promise<Document[]>
+document(documentId): Promise<Document>
+updateDocumentStatus(documentId, status): Promise<Document>     // offering|ready_to_sign|active|active_but_ending|ended
+updateDocumentMetadata(documentId, { metadata?, name?, description? }): Promise<Document>
+deleteDocument(documentId): Promise<void>                       // also removes the on-disk file
+```
+
+```ts
+const docs = await client.listDocuments({ personUserId: 'person-uuid', status: 'active' });
+const doc = await client.document(contract.id);
+const payload = doc.json();                          // decrypted plaintext (per-person) or as-is (broadcast)
+
+await client.updateDocumentStatus(contract.id, 'active');
+await client.updateDocumentMetadata(contract.id, { metadata: { ref: 'CT-2026-0042', signed: true } });
+await client.deleteDocument(notice.id);
+```
+
+A `Document` is `{ id, kind, name, description, status, payloadKind, isPrivate,
+value, metadata, createdAt, updatedAt, raw }` with a `.json()` helper for json docs.
+
+### Reacting to status changes in the pump
+
+When a recipient acts on a document (e.g. signs it), the feed emits a
+`document_status_changed` event. The `Change` carries `documentId` and the new
+`status` (other change events leave both `null`):
+
+```ts
+async function handle(change) {
+  if (await alreadyProcessed(change.id)) return;     // idempotency
+  if (change.event === 'document_status_changed') {
+    await onDocumentStatus(change.documentId, change.status);   // e.g. 'active'
+  } else if (change.event === 'field_updated') {
+    await store(change.personId, change.slug, change.value);
+  }
+  await markProcessed(change.id);
+}
+
+await client.processChanges(handle);
+```
+
+See [`docs/model.md`](docs/model.md) for the full `Document` / `Change` reference.
 
 ---
 
