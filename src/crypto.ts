@@ -31,9 +31,13 @@
  */
 
 import {
+  createCipheriv,
   createDecipheriv,
   createPrivateKey,
+  createPublicKey,
   privateDecrypt,
+  publicEncrypt,
+  randomBytes,
   constants as cryptoConstants,
   type KeyObject,
 } from 'node:crypto';
@@ -178,6 +182,66 @@ export function decrypt(wrapper: EncWrapper | string, privateKey: KeyObject): st
     throw new DecryptError('decrypted plaintext is not valid UTF-8');
   }
   return text;
+}
+
+/**
+ * Load a base64 SPKI/DER public key (the platform's `GET /api/keys` `public_key`) →
+ * a Node public key handle.
+ *
+ * Config-only key handling does NOT apply to a RECIPIENT public key: it is not a
+ * secret and is fetched live from the API per-recipient (never configured). The SDK
+ * still never accepts a *private* key/passphrase as a method argument.
+ */
+export function loadPublicKey(spkiB64: string): KeyObject {
+  let der: Buffer;
+  try {
+    der = b64decode(spkiB64, 'public_key');
+  } catch {
+    throw new DecryptError('recipient public_key is not valid base64');
+  }
+  try {
+    return createPublicKey({ key: der, format: 'der', type: 'spki' });
+  } catch (exc) {
+    throw new DecryptError(`recipient public_key is not a valid SPKI key: ${(exc as Error).message}`);
+  }
+}
+
+/**
+ * Encrypt a UTF-8 string FOR a recipient public key → a `{"_enc":1,k,iv,d}` wrapper.
+ *
+ * The exact inverse of {@link decrypt}:
+ *   aesKey  = 32 random bytes
+ *   d       = AES-256-GCM(aesKey, iv=12 random bytes).encrypt(utf8(plaintext))  // tag appended
+ *   k       = RSA-OAEP(SHA-256, MGF1-SHA256).encrypt(aesKey, publicKey)
+ *
+ * Used for EVERY per-person (targeted) document (json + file), independent of
+ * is_private — broadcast docs stay plaintext.
+ *
+ * **`oaepHash: 'sha256'` MUST be set explicitly** — Node defaults `oaepHash` to
+ * SHA-1 (and setting it pins MGF1 to the same digest), matching Web Crypto
+ * RSA-OAEP/SHA-256 so the value round-trips through {@link decrypt}.
+ */
+export function encryptForPublicKey(plaintext: string, publicKey: KeyObject): EncWrapper {
+  if (typeof plaintext !== 'string') {
+    throw new DecryptError('plaintext to encrypt must be a string');
+  }
+  const aesKey = randomBytes(32);
+  const iv = randomBytes(GCM_IV_LEN); // 12
+  // AES-256-GCM: append the 16-byte tag to the ciphertext (the platform layout).
+  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
+  const ct = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
+  const d = Buffer.concat([ct, cipher.getAuthTag()]);
+  // RSA-OAEP(SHA-256, MGF1-SHA256) — pin SHA-256 for digest AND MGF1 (never SHA-1).
+  const k = publicEncrypt(
+    { key: publicKey, padding: cryptoConstants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+    aesKey,
+  );
+  return {
+    _enc: 1,
+    k: k.toString('base64'),
+    iv: iv.toString('base64'),
+    d: d.toString('base64'),
+  };
 }
 
 /** Fetch a slot file endpoint → the inner `{"_enc":1,...}` wrapper. */

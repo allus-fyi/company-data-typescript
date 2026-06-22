@@ -47,6 +47,20 @@ export interface HttpResponse {
   headers: { get(name: string): string | null };
 }
 
+/**
+ * A request body carried by a write verb: either a JSON object (serialized by the
+ * transport with `Content-Type: application/json`) or raw bytes with an explicit
+ * Content-Type.
+ */
+export interface RequestBody {
+  /** A JSON-serializable value → `application/json`. */
+  json?: unknown;
+  /** Raw bytes (e.g. an encrypted file wrapper) with `contentType`. */
+  raw?: Buffer | Uint8Array | string;
+  /** The Content-Type for `raw` (defaults to `application/octet-stream`). */
+  contentType?: string;
+}
+
 /** A pluggable transport (the default wraps Node's global `fetch`). */
 export interface HttpTransport {
   post(url: string, form: Record<string, string>, headers: Record<string, string>): Promise<HttpResponse>;
@@ -54,6 +68,14 @@ export interface HttpTransport {
     url: string,
     params: Record<string, string | number> | undefined,
     headers: Record<string, string>,
+  ): Promise<HttpResponse>;
+  /** A generic request for the write verbs (POST/PUT/DELETE) with an optional body. */
+  request(
+    method: string,
+    url: string,
+    params: Record<string, string | number> | undefined,
+    headers: Record<string, string>,
+    body: RequestBody | undefined,
   ): Promise<HttpResponse>;
 }
 
@@ -87,6 +109,34 @@ export class FetchTransport implements HttpTransport {
       full += (url.includes('?') ? '&' : '?') + qs.toString();
     }
     const resp = await fetch(full, { method: 'GET', headers });
+    return resp;
+  }
+
+  async request(
+    method: string,
+    url: string,
+    params: Record<string, string | number> | undefined,
+    headers: Record<string, string>,
+    body: RequestBody | undefined,
+  ): Promise<HttpResponse> {
+    let full = url;
+    if (params && Object.keys(params).length > 0) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
+      full += (url.includes('?') ? '&' : '?') + qs.toString();
+    }
+    const init: { method: string; headers: Record<string, string>; body?: string | Uint8Array } = {
+      method,
+      headers: { ...headers },
+    };
+    if (body?.raw !== undefined) {
+      init.headers['Content-Type'] = body.contentType ?? 'application/octet-stream';
+      init.body = typeof body.raw === 'string' ? body.raw : Buffer.from(body.raw);
+    } else if (body?.json !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body.json);
+    }
+    const resp = await fetch(full, init as RequestInit);
     return resp;
   }
 }
@@ -194,21 +244,68 @@ export class HttpClient {
    * body's `error_key` when present).
    */
   async get(path: string, params?: Record<string, string | number>): Promise<unknown> {
+    return this.request('GET', path, { params });
+  }
+
+  /** POST `path` with a JSON body or raw bytes → parsed body. */
+  async post(
+    path: string,
+    opts: { json?: unknown; raw?: Buffer | Uint8Array | string; contentType?: string } = {},
+  ): Promise<unknown> {
+    return this.request('POST', path, opts);
+  }
+
+  /** PUT `path` with a JSON body → parsed body. */
+  async put(path: string, opts: { json?: unknown } = {}): Promise<unknown> {
+    return this.request('PUT', path, opts);
+  }
+
+  /** DELETE `path` → parsed body. */
+  async delete(path: string): Promise<unknown> {
+    return this.request('DELETE', path);
+  }
+
+  /**
+   * The shared request loop for every verb.
+   *
+   * Adds the bearer token + an `Accept` header matching `config.format`, carries an
+   * optional JSON or raw-bytes body, parses JSON or XML, and maps non-2xx responses
+   * to the SDK errors: 401 → one refresh-and-retry then {@link AuthError}; 429 →
+   * bounded Retry-After backoff then {@link RateLimitError}; other non-2xx →
+   * {@link ApiError} (carrying the body's `error_key` when present).
+   */
+  private async request(
+    method: string,
+    path: string,
+    opts: {
+      params?: Record<string, string | number>;
+      json?: unknown;
+      raw?: Buffer | Uint8Array | string;
+      contentType?: string;
+    } = {},
+  ): Promise<unknown> {
     const url = this.url(path);
     const wantsXml = this.config.format === 'xml';
     const accept = wantsXml ? 'application/xml' : 'application/json';
+    const body: RequestBody | undefined =
+      opts.raw !== undefined
+        ? { raw: opts.raw, contentType: opts.contentType }
+        : opts.json !== undefined
+          ? { json: opts.json }
+          : undefined;
 
     let retries429 = 0;
     let refreshed401 = false;
 
     for (;;) {
       const token = await this.bearer(false);
+      const headers = { Authorization: `Bearer ${token}`, Accept: accept };
       let resp: HttpResponse;
       try {
-        resp = await this.transport.get(url, params, {
-          Authorization: `Bearer ${token}`,
-          Accept: accept,
-        });
+        resp =
+          method === 'GET'
+            ? await this.transport.get(url, opts.params, headers)
+            : await this.transport.request(method, url, opts.params, headers, body);
       } catch (exc) {
         throw new ApiError(0, null, `request to ${path} failed: ${(exc as Error).message}`);
       }

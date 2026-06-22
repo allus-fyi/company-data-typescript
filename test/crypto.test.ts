@@ -13,13 +13,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, createDecipheriv } from 'node:crypto';
+import { createHash, randomBytes, createDecipheriv, generateKeyPairSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BinaryHandle, DecryptError, decrypt, loadPrivateKey } from '../src/index.js';
+import {
+  BinaryHandle,
+  DecryptError,
+  decrypt,
+  encryptForPublicKey,
+  loadPrivateKey,
+  loadPublicKey,
+} from '../src/index.js';
 import { VECTOR_PATH, loadVector, loadVectorPrivateKey } from './helpers.js';
 
 const vector = loadVector();
@@ -207,4 +214,26 @@ test('independent openssl cross-check (anti-circularity)', { skip: !which('opens
 // Sanity: the shared vector file actually exists on disk where the gate reads it.
 test('the shared vector file exists', () => {
   assert.ok(existsSync(VECTOR_PATH));
+});
+
+// ── encryptForPublicKey round-trips through decrypt ─────────────────────────────
+
+test('encryptForPublicKey round-trips through decrypt', () => {
+  // A throwaway RSA-2048 keypair; export the public half as base64 SPKI/DER (what
+  // GET /api/keys returns), then encrypt → decrypt back.
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const spkiB64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  const pub = loadPublicKey(spkiB64);
+
+  for (const pt of ['hello', '{"a":1}', 'with-üñîçödé', '']) {
+    const wrapper = encryptForPublicKey(pt, pub);
+    assert.equal(wrapper._enc, 1);
+    assert.ok(wrapper.k && wrapper.iv && wrapper.d);
+    assert.equal(decrypt(wrapper, privateKey), pt);
+  }
+});
+
+test('loadPublicKey rejects garbage', () => {
+  assert.throws(() => loadPublicKey('not-base64!!'), DecryptError);
+  assert.throws(() => loadPublicKey(Buffer.from('not a spki key').toString('base64')), DecryptError);
 });

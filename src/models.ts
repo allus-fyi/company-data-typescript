@@ -269,6 +269,10 @@ export class Change {
     readonly slug: string | null,
     readonly value: unknown,
     readonly live: boolean | null,
+    /** Set on `document_status_changed` — the affected document's id. */
+    readonly documentId: string | null,
+    /** Set on `document_status_changed` — the document's new lifecycle status. */
+    readonly status: string | null,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -297,6 +301,8 @@ export class Change {
 
     const personIdRaw = obj['person_user_id'] ?? obj['person_id'];
     const shareCodeRaw = obj['share_code'];
+    const documentIdRaw = obj['document_id'];
+    const statusRaw = event === 'document_status_changed' ? obj['status'] : null;
     return new Change(
       String(obj['id'] ?? ''),
       event,
@@ -305,6 +311,8 @@ export class Change {
       slug,
       value,
       live,
+      documentIdRaw != null ? String(documentIdRaw) : null,
+      statusRaw != null ? String(statusRaw) : null,
       parseIsoDate(obj['at']),
       obj,
     );
@@ -317,6 +325,90 @@ export class Change {
   ): Change[] {
     const items = listOf(body, 'changes');
     return items.map((o) => Change.fromApi(o, opts));
+  }
+}
+
+// ── document ─────────────────────────────────────────────────────────────────
+
+/**
+ * A company document the SDK created/queried (company-data side).
+ *
+ * value semantics mirror the connection-payload contract — keyed on
+ * BROADCAST(plaintext) vs PER-PERSON(always encrypted), NOT on is_private:
+ *   broadcast file   -> {file, original_name, mime_type, size}   (plaintext)
+ *   per-person file  -> {"_enc_file": "enc_…json"}   (ciphertext blob, ANY is_private)
+ *   broadcast json   -> the JSON object   (plaintext)
+ *   per-person json  -> {"_enc":1,k,iv,d}   (ciphertext wrapper, ANY is_private;
+ *                                            decrypt on demand via .json())
+ * is_private is device-display-only (lock vs decrypt-on-load), not the value shape.
+ */
+export class Document {
+  constructor(
+    readonly id: string,
+    readonly kind: string,
+    readonly name: string,
+    readonly description: string | null,
+    readonly status: string,
+    /** 'file' | 'json'. */
+    readonly payloadKind: string,
+    readonly isPrivate: boolean,
+    readonly value: unknown,
+    readonly metadata: Json | null,
+    readonly createdAt: Date | null,
+    readonly updatedAt: Date | null,
+    private readonly decryptValue: DecryptWrapper | null,
+    readonly raw: Json,
+  ) {}
+
+  /**
+   * For a json document, return the plaintext object.
+   *
+   * Decryption is keyed on the value shape (per-person → encrypted wrapper), NOT on
+   * is_private: a per-person json doc (ANY is_private) is an {"_enc":1,…} wrapper and
+   * is decrypted with the SDK's own private key; a broadcast json doc is already
+   * plaintext and returned as-is.
+   */
+  json(): unknown {
+    if (this.payloadKind !== 'json') {
+      throw new DecryptError("json() is only valid for payloadKind='json' documents");
+    }
+    if (
+      this.value !== null &&
+      typeof this.value === 'object' &&
+      !Array.isArray(this.value) &&
+      (this.value as Record<string, unknown>)['_enc'] === 1
+    ) {
+      if (this.decryptValue === null) {
+        throw new DecryptError('no decrypt wiring for an encrypted (per-person) document');
+      }
+      return JSON.parse(this.decryptValue(this.value as EncWrapper));
+    }
+    return this.value;
+  }
+
+  static fromApi(obj: Json, opts: { decryptValue?: DecryptWrapper | null } = {}): Document {
+    const metadata = obj['metadata'];
+    return new Document(
+      String(obj['id'] ?? ''),
+      obj['kind'] != null ? String(obj['kind']) : '',
+      obj['name'] != null ? String(obj['name']) : '',
+      obj['description'] != null ? String(obj['description']) : null,
+      obj['status'] != null ? String(obj['status']) : '',
+      obj['payload_kind'] != null ? String(obj['payload_kind']) : '',
+      Boolean(coerceBool(obj['is_private'])),
+      obj['value'] ?? null,
+      metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata) ? (metadata as Json) : null,
+      parseIsoDate(obj['created_at']),
+      parseIsoDate(obj['updated_at']),
+      opts.decryptValue ?? null,
+      obj,
+    );
+  }
+
+  /** Parse a `{total, items}` list response → a list of documents. */
+  static listFromApi(body: unknown, opts: { decryptValue?: DecryptWrapper | null } = {}): Document[] {
+    const items = listOf(body, 'items');
+    return items.map((o) => Document.fromApi(o, opts));
   }
 }
 

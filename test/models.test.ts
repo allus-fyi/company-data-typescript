@@ -10,7 +10,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { BinaryHandle, Change, Connection, LogEntry, RequestField, Value, decrypt } from '../src/index.js';
+import { createPublicKey } from 'node:crypto';
+
+import {
+  BinaryHandle,
+  Change,
+  Connection,
+  Document,
+  LogEntry,
+  RequestField,
+  Value,
+  decrypt,
+  encryptForPublicKey,
+  loadPublicKey,
+} from '../src/index.js';
 import type { EncWrapper } from '../src/index.js';
 import { encryptForKey, loadVector, loadVectorPrivateKey } from './helpers.js';
 
@@ -210,4 +223,69 @@ test('change includes share_code', () => {
   const changes = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
   assert.equal(changes[0].shareCode, 'ABC123');
   assert.equal(changes[1].shareCode, null);
+});
+
+// ── document_status_changed change + Document model ─────────────────────────────
+
+/** Encrypt a plaintext FOR the vector key's public half (as GET /api/keys returns it). */
+function encryptWithVectorPub(plaintext: string): EncWrapper {
+  const spkiB64 = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).toString('base64');
+  return encryptForPublicKey(plaintext, loadPublicKey(spkiB64));
+}
+
+test('change document_status_changed parses documentId + status', () => {
+  const body = {
+    changes: [
+      {
+        id: 'chg-doc',
+        event: 'document_status_changed',
+        person_user_id: 'u-1',
+        share_code: 'ABC123',
+        document_id: 'doc-9',
+        status: 'ended',
+        at: '2026-06-22T10:00:00Z',
+      },
+    ],
+  };
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  assert.equal(chg.event, 'document_status_changed');
+  assert.equal(chg.documentId, 'doc-9');
+  assert.equal(chg.status, 'ended');
+  assert.equal(chg.personId, 'u-1');
+  assert.equal(chg.shareCode, 'ABC123');
+  assert.equal(chg.slug, null);
+  assert.equal(chg.value, null);
+  assert.equal(chg.live, null);
+});
+
+test('Document broadcast json is plaintext (no decrypt needed)', () => {
+  const doc = Document.fromApi({
+    id: 'd1',
+    kind: 'document',
+    name: 'Terms',
+    status: 'active',
+    payload_kind: 'json',
+    is_private: false,
+    value: { v: 1 },
+    metadata: {},
+  });
+  assert.deepEqual(doc.json(), { v: 1 });
+});
+
+test('Document per-person json decrypts via injected decrypt', () => {
+  const wrapper = encryptWithVectorPub(JSON.stringify({ plan: 'pro' }));
+  const doc = Document.fromApi(
+    {
+      id: 'd2',
+      kind: 'document',
+      name: 'PP',
+      status: 'active',
+      payload_kind: 'json',
+      is_private: true,
+      value: wrapper,
+      metadata: {},
+    },
+    { decryptValue },
+  );
+  assert.deepEqual(doc.json(), { plan: 'pro' });
 });
