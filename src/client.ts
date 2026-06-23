@@ -49,8 +49,10 @@ import {
   type EncWrapper,
 } from './crypto.js';
 import { ApiError, ConfigError, DecryptError, RateLimitError } from './errors.js';
+import { evaluateCondition } from './flowCondition.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
-import { Change, Connection, Document, LogEntry, RequestField } from './models.js';
+import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
+import { createCipheriv, createPublicKey, randomBytes } from 'node:crypto';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
 import { handleWebhook, loadAccountKey, parseWebhook, verifyWebhook, type Headers } from './webhooks.js';
@@ -62,6 +64,8 @@ const CHANGES = `${BASE}/changes`;
 const REQUEST_FIELDS = `${BASE}/request-fields`;
 const LOGS = `${BASE}/logs`;
 const DOCUMENTS = `${BASE}/documents`;
+const FLOWS = `${BASE}/flows`; // POST /api/company-data/flows/{flowId}/runs
+const FLOW_RUNS = `${BASE}/flow-runs`; // list / get / answers / generate
 const KEYS = '/api/keys';
 
 // Default page size for the connections iterator. The endpoint is heavily
@@ -112,6 +116,9 @@ export class Client {
   // Recipient RSA public keys (by shareCode) — cached for per-person document
   // encryption. A public key is immutable + not a secret (fetched live, never configured).
   private pubKeyCache: Map<string, KeyObject> = new Map();
+
+  // The service RSA public key (public half of the loaded private key), derived once.
+  private servicePubKey: KeyObject | null = null;
 
   constructor(config: Config, opts: ClientOptions = {}) {
     this.config = config;
@@ -641,6 +648,199 @@ export class Client {
   async deleteDocument(documentId: string): Promise<void> {
     await this.http.delete(`${DOCUMENTS}/${documentId}`);
   }
+
+  // ── contract-flow runs (company side — the company is a bound party) ─────────
+
+  /**
+   * Start a run for a connection.
+   *
+   * `bindings` = `{party_key: user_id}` covering the flow's parties (each bound
+   * user must be the company or the connected person). Pins the flow's latest
+   * PUBLISHED version. `connectionId` is the person-side
+   * `company_service_connections.id` for this service. Resolves to the created
+   * {@link FlowRun} (status `awaiting_<entry node's party>`).
+   */
+  async triggerFlowRun(
+    flowId: string,
+    opts: { connectionId: string; bindings: Record<string, string> },
+  ): Promise<FlowRun> {
+    const body = { target: { connection_id: opts.connectionId }, bindings: opts.bindings };
+    const created = await this.http.post(`${FLOWS}/${flowId}/runs`, { json: body });
+    return FlowRun.fromApi(asJson(created));
+  }
+
+  /**
+   * List this service's runs. Default `awaiting_company` = the actionable queue.
+   * Pass `status: null` for all runs, or any status filter.
+   */
+  async flowRuns(opts: { status?: string | null } = {}): Promise<FlowRun[]> {
+    const status = opts.status === undefined ? 'awaiting_company' : opts.status;
+    const params = status ? { status } : undefined;
+    const body = await this.http.get(FLOW_RUNS, params);
+    return listItems(body).map((o) => FlowRun.fromApi(asJson(o)));
+  }
+
+  /** Fetch one run by id → {@link FlowRun}. */
+  async flowRun(runId: string): Promise<FlowRun> {
+    const body = await this.http.get(`${FLOW_RUNS}/${runId}`);
+    return FlowRun.fromApi(asJson(body));
+  }
+
+  /**
+   * The service RSA public key = the public half of the loaded service private key.
+   * The run payload does NOT carry the service public key; the company makes its own
+   * answer copy by encrypting to the public half of the same RSA pair it already
+   * holds (config-only key handling — no extra fetch, no key arg).
+   */
+  private servicePublicKey(): KeyObject {
+    if (this.servicePubKey === null) {
+      this.servicePubKey = createPublicKey(this.privateKey);
+    }
+    return this.servicePubKey;
+  }
+
+  /**
+   * Decrypt the company's service-key answer copies → `{slug: plaintext}`.
+   * Only the rows whose `for_user_id` is the company's bound user_id are decryptable
+   * with the service private key; the person's copies are skipped.
+   */
+  private decryptRunAnswers(run: FlowRun): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const row of run.answers) {
+      if (row['for_user_id'] !== run.serviceUserId) continue;
+      const slug = row['slug'];
+      const v = row['value'];
+      if (typeof slug !== 'string' || v == null) continue;
+      out[slug] = cryptoDecrypt(v as EncWrapper | string, this.privateKey);
+    }
+    return out;
+  }
+
+  /**
+   * Resolve a person party's RSA public key for per-party answer encryption.
+   *
+   * Prefers a caller-supplied key, else resolves the person's share_code from the
+   * run's connection → `GET /api/keys/{code}`.
+   *
+   * Integration gap: the run payload exposes neither person public keys nor
+   * per-binding share codes, so the SDK resolves via the connection. Pass
+   * `partyPubKeys` to skip the lookup entirely.
+   */
+  private async flowPersonPublicKey(
+    run: FlowRun,
+    uid: string,
+    partyPubKeys: Record<string, KeyObject>,
+  ): Promise<KeyObject> {
+    const supplied = partyPubKeys[uid];
+    if (supplied !== undefined) return supplied;
+    const shareCode = await this.resolveShareCode(run.connectionId ?? undefined, uid);
+    return this.recipientPublicKey(shareCode);
+  }
+
+  /**
+   * Fill the company's current node and advance.
+   *
+   * `fill` = `{slug: plaintext_value}` the caller computed for this node. For EACH
+   * answer the SDK encrypts one copy per bound party (the company via the service
+   * public key; each person party via their public key), evaluates the next node
+   * LOCALLY (ordered outgoing edges, first match) over the full decrypted answer
+   * map, and POSTs `{answers, next_node?/leaf, next_party?}`.
+   *
+   * Resolves to the refreshed {@link FlowRun}. A document-mode leaf leaves the run
+   * `generating` — call {@link generateFlowDocument} (or {@link processFlowRun},
+   * which chains it).
+   */
+  async submitFlowAnswers(
+    run: FlowRun,
+    fill: Record<string, unknown>,
+    opts: { partyPubKeys?: Record<string, KeyObject> } = {},
+  ): Promise<FlowRun> {
+    const partyPubKeys = opts.partyPubKeys ?? {};
+    const answersSoFar = this.decryptRunAnswers(run);
+    const full: Record<string, unknown> = { ...answersSoFar, ...fill };
+    const svcPub = this.servicePublicKey();
+
+    const answersOut: Json[] = [];
+    for (const [slug, val] of Object.entries(fill)) {
+      const plain = typeof val === 'string' ? val : JSON.stringify(val);
+      const values: Json[] = [];
+      for (const uid of Object.values(run.bindings)) {
+        const key =
+          uid === run.serviceUserId ? svcPub : await this.flowPersonPublicKey(run, uid, partyPubKeys);
+        values.push({ for_user_id: uid, value: encryptForPublicKey(plain, key) });
+      }
+      answersOut.push({ slug, values });
+    }
+
+    const nxt = computeNext(run.definition, run.currentNode, full);
+    const body: Json = { answers: answersOut };
+    if (nxt.leaf) {
+      body['leaf'] = true;
+    } else {
+      body['next_node'] = nxt.nextNode;
+      body['next_party'] = partyOf(run.definition, nxt.nextNode);
+    }
+    const res = await this.http.post(`${FLOW_RUNS}/${run.id}/answers`, { json: body });
+    return FlowRun.fromApi(asJson(res));
+  }
+
+  /**
+   * Document-mode company leaf: one-time-key value gather → POST /generate.
+   *
+   * Builds a random 32-byte AES-256-GCM key, encrypts `JSON({slug: plaintext})` of
+   * the company's decrypted answers, packs `iv(12)||ciphertext||tag(16)`, and POSTs
+   * `{otk: base64(key), values: base64(blob)}`. Resolves to the API response
+   * `{document_id, status: "awaiting_signature"}` (idempotent).
+   */
+  async generateFlowDocument(run: FlowRun): Promise<unknown> {
+    const answers = this.decryptRunAnswers(run);
+    const map: Record<string, string> = {};
+    for (const [k, v] of Object.entries(answers)) {
+      map[k] = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+    const payload = Buffer.from(JSON.stringify(map), 'utf8');
+    const otk = randomBytes(32);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', otk, iv);
+    const ct = Buffer.concat([cipher.update(payload), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const blob = Buffer.concat([iv, ct, tag]); // iv(12) || ciphertext || tag(16)
+    const body = { otk: otk.toString('base64'), values: blob.toString('base64') };
+    return this.http.post(`${FLOW_RUNS}/${run.id}/generate`, { json: body });
+  }
+
+  /**
+   * High-level company turn: load → (if our turn) fill + advance + generate.
+   *
+   * `fillNode(node, answers) -> {slug: value}` is the company's logic for the
+   * current node. The SDK encrypts per party, submits, and — if the submit landed
+   * on a document-mode leaf — calls {@link generateFlowDocument}. Resolves to the
+   * latest {@link FlowRun}; when the run is not awaiting the company it is returned
+   * untouched.
+   */
+  async processFlowRun(
+    runId: string,
+    fillNode: (node: Json, answers: Record<string, unknown>) => Record<string, unknown> | undefined,
+    opts: { partyPubKeys?: Record<string, KeyObject> } = {},
+  ): Promise<FlowRun> {
+    let run = await this.flowRun(runId);
+    const companyParty = run.companyPartyKey;
+    if (companyParty === null || run.status !== `awaiting_${companyParty}`) {
+      return run; // not our turn (or company not bound)
+    }
+    const node = nodeByKey(run.definition, run.currentNode);
+    if (node === null) return run;
+    const answers = this.decryptRunAnswers(run);
+    const fill = fillNode(node, answers) ?? {};
+    const wasLeaf = computeNext(run.definition, run.currentNode, { ...answers, ...fill }).leaf;
+    run = await this.submitFlowAnswers(run, fill, { partyPubKeys: opts.partyPubKeys });
+    const mode = run.outputMode ?? (run.definition['output_mode'] != null ? String(run.definition['output_mode']) : null);
+    if (wasLeaf && mode === 'document') {
+      await this.generateFlowDocument(run);
+      run = await this.flowRun(run.id);
+    }
+    return run;
+  }
 }
 
 // ── module-level helpers ──────────────────────────────────────────────────────
@@ -680,6 +880,53 @@ function docObj(body: unknown): Json {
     return body as Json;
   }
   return {};
+}
+
+/** Coerce a response body to a plain JSON object (else `{}`). */
+function asJson(body: unknown): Json {
+  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    return body as Json;
+  }
+  return {};
+}
+
+/** Look up a node by key in the pinned definition graph. */
+function nodeByKey(definition: Json, key: string | null): Json | null {
+  const nodes = definition['nodes'];
+  if (!Array.isArray(nodes)) return null;
+  for (const n of nodes) {
+    if (n !== null && typeof n === 'object' && (n as Json)['key'] === key) return n as Json;
+  }
+  return null;
+}
+
+/**
+ * The next node after `fromKey` — ordered outgoing edges, first match wins.
+ * Returns `{nextNode}` or `{leaf:true}` (no outgoing edge, or none matched — a
+ * dead-end is treated as a leaf, matching the platform engine).
+ */
+function computeNext(
+  definition: Json,
+  fromKey: string | null,
+  answers: Record<string, unknown>,
+): { leaf: true } | { leaf: false; nextNode: string } {
+  const edgesRaw = definition['edges'];
+  const edges = (Array.isArray(edgesRaw) ? edgesRaw : [])
+    .filter((e): e is Json => e !== null && typeof e === 'object' && !Array.isArray(e) && (e as Json)['from'] === fromKey)
+    .sort((a, b) => Number((a as Json)['sort'] ?? 0) - Number((b as Json)['sort'] ?? 0));
+  if (edges.length === 0) return { leaf: true };
+  for (const e of edges) {
+    if (evaluateCondition(e['condition'], answers)) {
+      return { leaf: false, nextNode: String(e['to']) };
+    }
+  }
+  return { leaf: true };
+}
+
+/** The party that owns `nodeKey` in the definition. */
+function partyOf(definition: Json, nodeKey: string): string | null {
+  const node = nodeByKey(definition, nodeKey);
+  return node && node['party'] != null ? String(node['party']) : null;
 }
 
 /** Build a `data:<mime>;base64,<…>` URI for the per-person file envelope. */
