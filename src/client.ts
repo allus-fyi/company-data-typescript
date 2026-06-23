@@ -64,6 +64,7 @@ const CHANGES = `${BASE}/changes`;
 const REQUEST_FIELDS = `${BASE}/request-fields`;
 const LOGS = `${BASE}/logs`;
 const DOCUMENTS = `${BASE}/documents`;
+const CONNECT_REQUESTS = `${BASE}/connect-requests`;
 const FLOWS = `${BASE}/flows`; // POST /api/company-data/flows/{flowId}/runs
 const FLOW_RUNS = `${BASE}/flow-runs`; // list / get / answers / generate
 const KEYS = '/api/keys';
@@ -647,6 +648,26 @@ export class Client {
   /** Delete a document (and its on-disk file). */
   async deleteDocument(documentId: string): Promise<void> {
     await this.http.delete(`${DOCUMENTS}/${documentId}`);
+  }
+
+  // ── connect requests (service-initiated; idea 2) ────────────────────────────
+
+  /**
+   * Invite a person (by their share code) to connect to THIS service.
+   *
+   * Wraps `POST /api/company-data/connect-requests` — auto-scoped to the calling
+   * client's service. Fire-and-forget: the person accepts or rejects, and the
+   * outcome reaches you only via the change feed / webhooks
+   * (`connection_request_accepted` / `connection_request_rejected`). No crypto,
+   * no key handling (the request carries no values). Returns the new request_id.
+   */
+  async sendConnectRequest(shareCode: string): Promise<string> {
+    const code = (shareCode ?? '').trim();
+    if (!code) throw new ConfigError('shareCode is required');
+    const body = await this.http.post(CONNECT_REQUESTS, { json: { share_code: code } });
+    const rid = (body as { request_id?: string } | null)?.request_id;
+    if (!rid) throw new ApiError(0, 'company_connections.request_failed', 'no request_id in response');
+    return rid;
   }
 
   // ── contract-flow runs (company side — the company is a bound party) ─────────

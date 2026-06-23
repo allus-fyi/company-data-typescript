@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BinaryHandle, Client, Config, ConfigError, Connection, Document, HttpClient, LogEntry, RequestField, decrypt, loadPrivateKey } from '../src/index.js';
+import { ApiError, BinaryHandle, Change, Client, Config, ConfigError, Connection, Document, HttpClient, LogEntry, RequestField, decrypt, loadPrivateKey } from '../src/index.js';
 import type { HttpResponse, HttpTransport, RequestBody, EncWrapper } from '../src/index.js';
 import { createPublicKey } from 'node:crypto';
 import { encryptForKey, loadVector } from './helpers.js';
@@ -631,4 +631,80 @@ test('document_status_changed feed event parses into a Change', async () => {
     });
     assert.deepEqual(seen, [{ event: 'document_status_changed', documentId: 'doc-9', status: 'ended' }]);
   });
+});
+
+// ── connect requests (service-initiated; idea 2) ────────────────────────────────
+
+test('sendConnectRequest posts share_code and returns request_id', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    let captured: RequestBody | undefined;
+    const { client } = makeClientRw(config, NO_GET, (method, url, body) => {
+      assert.equal(method, 'POST');
+      assert.ok(url.endsWith('/company-data/connect-requests'));
+      captured = body;
+      return new FakeResponse(201, { request_id: 'req-1' });
+    });
+    const rid = await client.sendConnectRequest('ABC123');
+    assert.equal(rid, 'req-1');
+    assert.deepEqual(captured?.json, { share_code: 'ABC123' });
+  });
+});
+
+test('sendConnectRequest trims the share code', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    let captured: RequestBody | undefined;
+    const { client } = makeClientRw(config, NO_GET, (_method, _url, body) => {
+      captured = body;
+      return new FakeResponse(201, { request_id: 'req-2' });
+    });
+    assert.equal(await client.sendConnectRequest('  XYZ789 '), 'req-2');
+    assert.deepEqual(captured?.json, { share_code: 'XYZ789' });
+  });
+});
+
+test('sendConnectRequest blank throws ConfigError', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client } = makeClientRw(config, NO_GET, () => new FakeResponse(200, {}));
+    await assert.rejects(() => client.sendConnectRequest('   '), ConfigError);
+  });
+});
+
+test('sendConnectRequest missing request_id throws ApiError', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client } = makeClientRw(config, NO_GET, () => new FakeResponse(201, {}));
+    await assert.rejects(() => client.sendConnectRequest('ABC123'), ApiError);
+  });
+});
+
+test('Change parses connect-request outcome events (request_id, no slug/value)', () => {
+  const opts = { typeForSlug: () => null, decryptValue: (v: unknown) => String(v) };
+
+  const accepted = Change.fromApi(
+    {
+      id: 'c1', event: 'connection_request_accepted', request_id: 'req-9',
+      person_user_id: 'person-1', share_code: 'P1CODE', at: '2026-06-23T10:00:00Z',
+    },
+    opts,
+  );
+  assert.equal(accepted.event, 'connection_request_accepted');
+  assert.equal(accepted.requestId, 'req-9');
+  assert.equal(accepted.personId, 'person-1');
+  assert.equal(accepted.shareCode, 'P1CODE');
+  assert.equal(accepted.slug, null);
+  assert.equal(accepted.value, null);
+
+  const rejected = Change.fromApi(
+    { id: 'c2', event: 'connection_request_rejected', request_id: 'req-8', person_user_id: 'person-2' },
+    opts,
+  );
+  assert.equal(rejected.event, 'connection_request_rejected');
+  assert.equal(rejected.requestId, 'req-8');
+
+  // request_id stays null for unrelated events.
+  const created = Change.fromApi({ id: 'c3', event: 'connection_created', person_user_id: 'person-3' }, opts);
+  assert.equal(created.requestId, null);
 });
