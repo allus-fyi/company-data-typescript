@@ -454,6 +454,103 @@ export class LogEntry {
   }
 }
 
+// ── flow run ─────────────────────────────────────────────────────────────────
+
+/**
+ * A contract-flow run (company-data side).
+ *
+ * The company is one of the two bound parties. `bindings` maps each party key to
+ * the bound `user_id` (the company's own is `companyUserId`); `answers` are the
+ * per-party encrypted answer copies (the company reads the rows whose
+ * `for_user_id === companyUserId`, decryptable with the service private key);
+ * `definition` is the pinned flow-version graph (`nodes`, `edges`, `parties`,
+ * `output_mode`).
+ */
+export class FlowRun {
+  constructor(
+    readonly id: string,
+    readonly flowId: string | null,
+    readonly flowVersion: unknown,
+    readonly serviceId: string | null,
+    readonly connectionId: string | null,
+    readonly companyUserId: string | null,
+    readonly bindings: Record<string, string>,
+    readonly status: string | null,
+    readonly currentNode: string | null,
+    readonly documentId: string | null,
+    readonly outputMode: string | null,
+    readonly definition: Json,
+    readonly answers: Json[],
+    readonly createdAt: Date | null,
+    readonly updatedAt: Date | null,
+    readonly raw: Json,
+  ) {}
+
+  /** The party key the company is bound to (`bindings[key] === companyUserId`). */
+  get companyPartyKey(): string | null {
+    for (const [key, uid] of Object.entries(this.bindings)) {
+      if (uid === this.companyUserId) return key;
+    }
+    return null;
+  }
+
+  /** The company's bound user_id — its answer copies use this `for_user_id`. */
+  get serviceUserId(): string | null {
+    return this.companyUserId;
+  }
+
+  static fromApi(obj: Json): FlowRun {
+    const o = obj ?? {};
+    let definition: Json;
+    const rawDef = o['definition'];
+    if (rawDef !== null && typeof rawDef === 'object' && !Array.isArray(rawDef)) {
+      definition = rawDef as Json;
+    } else {
+      definition = {
+        nodes: o['nodes'] ?? [],
+        edges: o['edges'] ?? [],
+        parties: o['parties'] ?? [],
+        output_mode: o['output_mode'] ?? null,
+      };
+    }
+    const bindingsRaw = o['bindings'];
+    const bindings: Record<string, string> = {};
+    if (bindingsRaw !== null && typeof bindingsRaw === 'object' && !Array.isArray(bindingsRaw)) {
+      for (const [k, v] of Object.entries(bindingsRaw as Record<string, unknown>)) {
+        bindings[k] = v == null ? '' : String(v);
+      }
+    }
+    const answersRaw = o['answers'];
+    const answers = Array.isArray(answersRaw)
+      ? (answersRaw.filter((a) => a !== null && typeof a === 'object' && !Array.isArray(a)) as Json[])
+      : [];
+    const outputMode =
+      o['output_mode'] != null
+        ? String(o['output_mode'])
+        : definition['output_mode'] != null
+          ? String(definition['output_mode'])
+          : null;
+    return new FlowRun(
+      o['id'] != null ? String(o['id']) : '',
+      o['flow_id'] != null ? String(o['flow_id']) : null,
+      o['flow_version'] ?? null,
+      o['service_id'] != null ? String(o['service_id']) : null,
+      o['connection_id'] != null ? String(o['connection_id']) : null,
+      o['company_user_id'] != null ? String(o['company_user_id']) : null,
+      bindings,
+      o['status'] != null ? String(o['status']) : null,
+      o['current_node'] != null ? String(o['current_node']) : null,
+      o['document_id'] != null ? String(o['document_id']) : null,
+      outputMode,
+      definition,
+      answers,
+      parseIsoDate(o['created_at']),
+      parseIsoDate(o['updated_at']),
+      o,
+    );
+  }
+}
+
 // ── shared list extraction ───────────────────────────────────────────────────
 
 /**
