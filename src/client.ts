@@ -580,19 +580,20 @@ export class Client {
     const doc = Document.fromApi(docObj(created), { decryptValue: this.decryptValue });
     const fileBytes = Buffer.from(opts.fileBytes);
     if (perPerson) {
-      // Encrypt the file bytes (EVERY per-person doc): wrap the file envelope string,
-      // then send the wrapper as bytes.
+      // EVERY per-person file doc is E2E-encrypted: wrap the file envelope string,
+      // encrypt it for the recipient, then POST {"value": "<wrapper JSON string>"}.
+      // The /file endpoint requires `value` to be a STRING (isValidEncryptedBlob),
+      // so the wrapper object is JSON.stringify'd; the bare wrapper was rejected (400).
       const envelope = JSON.stringify({ file: dataUri(fileBytes, opts.fileMime) });
       const wrapper = encryptForPublicKey(envelope, pubKey as KeyObject);
       await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
-        raw: Buffer.from(JSON.stringify(wrapper), 'utf8'),
-        contentType: 'application/json',
+        json: { value: JSON.stringify(wrapper) },
       });
     } else {
-      // Broadcast — raw plaintext bytes.
+      // Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
+      // The API rejected the old raw-bytes body (documents.invalid_payload: file required).
       await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
-        raw: fileBytes,
-        contentType: opts.fileMime ?? 'application/octet-stream',
+        json: { file: dataUri(fileBytes, opts.fileMime), original_name: opts.name },
       });
     }
     return doc;
