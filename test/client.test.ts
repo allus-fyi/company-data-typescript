@@ -512,7 +512,7 @@ test('createDocument invalid kind throws ConfigError', async () => {
   });
 });
 
-test('createDocument file broadcast uploads raw bytes', async () => {
+test('createDocument file broadcast uploads file data URI', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const { client, transport } = makeClientRw(config, NO_GET, (_method, url) => {
@@ -532,11 +532,20 @@ test('createDocument file broadcast uploads raw bytes', async () => {
     assert.ok(reqs[0].url.endsWith('/documents'));
     assert.equal((reqs[0].json as Record<string, unknown>)['target'], null);
     assert.ok(reqs[1].url.endsWith('/documents/f1/file'));
-    assert.deepEqual(Buffer.from(reqs[1].data as Uint8Array), Buffer.from('%PDF-1.4 x')); // raw plaintext bytes
+    // JSON body {"file": "data:…;base64,…", "original_name": "C"}; no raw bytes.
+    assert.equal(reqs[1].data, undefined);
+    const sent = reqs[1].json as Record<string, unknown>;
+    assert.equal(sent['original_name'], 'C');
+    const fileUri = sent['file'] as string;
+    assert.ok(fileUri.startsWith('data:application/pdf;base64,'));
+    assert.deepEqual(
+      Buffer.from(fileUri.split(',', 2)[1], 'base64'),
+      Buffer.from('%PDF-1.4 x'),
+    );
   });
 });
 
-test('createDocument file per-person uploads wrapper bytes', async () => {
+test('createDocument file per-person uploads value-wrapped ciphertext', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const spki = vectorPubSpkiB64();
@@ -558,10 +567,13 @@ test('createDocument file per-person uploads wrapper bytes', async () => {
       name: 'C', payloadKind: 'file', fileBytes: Buffer.from('hello-bytes'), fileMime: 'application/pdf',
       personUserId: 'u1', shareCode: 'ABC123', isPrivate: true,
     });
-    const upload = transport.requests[1].data as Uint8Array;
-    assert.ok(Buffer.isBuffer(Buffer.from(upload)));
-    const wrapper = JSON.parse(Buffer.from(upload).toString('utf8'));
-    assert.equal(wrapper._enc, 1); // ciphertext wrapper bytes, not the raw file
+    // JSON body {"value": "<wrapper as JSON STRING>"}; no raw bytes.
+    assert.equal(transport.requests[1].data, undefined);
+    const sent = transport.requests[1].json as Record<string, unknown>;
+    const valueStr = sent['value'];
+    assert.equal(typeof valueStr, 'string'); // value MUST be a string (isValidEncryptedBlob)
+    const wrapper = JSON.parse(valueStr as string);
+    assert.equal(wrapper._enc, 1); // the string parses to the ciphertext wrapper
     // decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
     const env = JSON.parse(decrypt(wrapper as EncWrapper, priv));
     assert.ok((env.file as string).startsWith('data:application/pdf;base64,'));
