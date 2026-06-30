@@ -476,7 +476,9 @@ export class Client {
    * (no target).
    *
    * `payloadKind:'json'` → `jsonValue` (object). `payloadKind:'file'` → `fileBytes`
-   * (+ `fileMime`).
+   * (+ `fileMime`). For a BROADCAST file the server validates a real file extension;
+   * one is derived from `fileMime` when `name` has none. Pass `fileName` to set
+   * original_name explicitly.
    *
    * Encryption is decided by the TARGET, not by is_private:
    *   PER-PERSON (connectionId/personUserId given) → the value is ALWAYS encrypted FOR
@@ -504,6 +506,8 @@ export class Client {
     jsonValue?: unknown;
     fileBytes?: Buffer | Uint8Array;
     fileMime?: string;
+    /** Broadcast file: set original_name explicitly (else derived from name/fileMime). */
+    fileName?: string;
     /** Contract: the person must sign (step-up). Forces a per-person target. */
     requiresSignature?: boolean;
     /** Contract: the person must accept. Forces a per-person target. */
@@ -593,7 +597,10 @@ export class Client {
       // Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
       // The API rejected the old raw-bytes body (documents.invalid_payload: file required).
       await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
-        json: { file: dataUri(fileBytes, opts.fileMime), original_name: opts.name },
+        json: {
+          file: dataUri(fileBytes, opts.fileMime),
+          original_name: broadcastOriginalName(opts.fileName, opts.name, opts.fileMime),
+        },
       });
     }
     return doc;
@@ -955,6 +962,37 @@ function partyOf(definition: Json, nodeKey: string): string | null {
 function dataUri(fileBytes: Buffer, mime: string | undefined): string {
   const b64 = fileBytes.toString('base64');
   return `data:${mime ?? 'application/octet-stream'};base64,${b64}`;
+}
+
+/** Allowed broadcast-document MIME → file extension (mirrors the API's allowlist). */
+const MIME_EXT: Record<string, string> = {
+  'application/pdf': 'pdf',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+};
+const ALLOWED_DOC_EXTS = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'png', 'jpg', 'jpeg']);
+
+/**
+ * `original_name` for a broadcast file upload. The API validates its extension
+ * against an allowlist, but `name` is a human label that often has no extension.
+ * Use an explicit `fileName`; else keep `name` if it already ends in an allowed
+ * extension; else append the extension derived from `fileMime` (so `"Price list"`
+ * + `application/pdf` → `"Price list.pdf"`).
+ */
+function broadcastOriginalName(
+  fileName: string | undefined,
+  name: string,
+  fileMime: string | undefined,
+): string {
+  if (fileName) return fileName;
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  if (ALLOWED_DOC_EXTS.has(ext)) return name;
+  const derived = MIME_EXT[(fileMime ?? '').toLowerCase()];
+  return derived ? `${name}.${derived}` : name;
 }
 
 /** Pull the `items` array out of a `{total, items}` list response. */
