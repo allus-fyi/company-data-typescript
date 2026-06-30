@@ -277,7 +277,30 @@ test('change document_status_changed carries action for a contract', () => {
   assert.equal(chg.action, 'signed');
   assert.equal(chg.documentId, 'doc-7');
   assert.equal(chg.status, 'active');
+  assert.equal(chg.note, null);
   assert.equal(chg.slug, null);
+});
+
+test('change document_status_changed carries note on a cancellation', () => {
+  const body = {
+    changes: [
+      {
+        id: 'chg-cancel',
+        event: 'document_status_changed',
+        person_user_id: 'u-3',
+        action: 'cancelled',
+        note: 'Too expensive',
+        document_id: 'doc-5',
+        status: 'ended',
+        at: '2026-06-22T10:00:00Z',
+      },
+    ],
+  };
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  assert.equal(chg.event, 'document_status_changed');
+  assert.equal(chg.action, 'cancelled');
+  assert.equal(chg.note, 'Too expensive');
+  assert.equal(chg.status, 'ended');
 });
 
 test('Document carries contract flags + signatures', () => {

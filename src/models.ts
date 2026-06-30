@@ -275,6 +275,8 @@ export class Change {
     readonly status: string | null,
     /** Set on `document_status_changed` for a contract — signed | accepted | cancelled (else null). */
     readonly action: string | null,
+    /** Set on `document_status_changed` — the person's optional cancellation note (else null). */
+    readonly note: string | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
     readonly at: Date | null,
@@ -308,6 +310,7 @@ export class Change {
     const documentIdRaw = obj['document_id'];
     const statusRaw = event === 'document_status_changed' ? obj['status'] : null;
     const actionRaw = event === 'document_status_changed' ? obj['action'] : null;
+    const noteRaw = event === 'document_status_changed' ? obj['note'] : null;
     const requestIdRaw =
       event === 'connection_request_accepted' || event === 'connection_request_rejected'
         ? obj['request_id']
@@ -323,6 +326,7 @@ export class Change {
       documentIdRaw != null ? String(documentIdRaw) : null,
       statusRaw != null ? String(statusRaw) : null,
       actionRaw != null ? String(actionRaw) : null,
+      noteRaw != null ? String(noteRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       parseIsoDate(obj['at']),
       obj,
