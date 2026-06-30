@@ -532,15 +532,74 @@ test('createDocument file broadcast uploads file data URI', async () => {
     assert.ok(reqs[0].url.endsWith('/documents'));
     assert.equal((reqs[0].json as Record<string, unknown>)['target'], null);
     assert.ok(reqs[1].url.endsWith('/documents/f1/file'));
-    // JSON body {"file": "data:…;base64,…", "original_name": "C"}; no raw bytes.
+    // JSON body {"file": "data:…;base64,…", "original_name": "C.pdf"}; no raw bytes.
+    // The extensionless label "C" gets a .pdf extension derived from fileMime so the
+    // API's extension allowlist accepts it (was sent bare "C" → documents.bad_mime).
     assert.equal(reqs[1].data, undefined);
     const sent = reqs[1].json as Record<string, unknown>;
-    assert.equal(sent['original_name'], 'C');
+    assert.equal(sent['original_name'], 'C.pdf');
     const fileUri = sent['file'] as string;
     assert.ok(fileUri.startsWith('data:application/pdf;base64,'));
     assert.deepEqual(
       Buffer.from(fileUri.split(',', 2)[1], 'base64'),
       Buffer.from('%PDF-1.4 x'),
+    );
+  });
+});
+
+/** Run a broadcast file createDocument and return the original_name the SDK sent. */
+async function broadcastOriginalNameFor(
+  dir: string,
+  opts: { name: string; fileMime?: string; fileName?: string },
+): Promise<string> {
+  const config = makeConfig(dir);
+  const { client, transport } = makeClientRw(config, NO_GET, (_method, url) => {
+    if (url.endsWith('/documents')) {
+      return new FakeResponse(201, {
+        id: 'f1', kind: 'document', name: opts.name, description: null, status: 'active',
+        payload_kind: 'file', is_private: false, value: { _pending: true }, metadata: null, created_at: null, updated_at: null,
+      });
+    }
+    return new FakeResponse(200, { id: 'f1' });
+  });
+  await client.createDocument({
+    name: opts.name, payloadKind: 'file', fileBytes: Buffer.from('%PDF-1.4 x'),
+    fileMime: opts.fileMime, fileName: opts.fileName,
+  });
+  const fileReq = transport.requests.find((r) => r.url.endsWith('/documents/f1/file'));
+  assert.ok(fileReq);
+  return (fileReq.json as Record<string, unknown>)['original_name'] as string;
+}
+
+test('createDocument broadcast keeps name already ending in an allowed extension', async () => {
+  await withTmp(async (dir) => {
+    // "report.pdf" already has an allowed extension — sent unchanged (no double ".pdf.pdf").
+    assert.equal(
+      await broadcastOriginalNameFor(dir, { name: 'report.pdf', fileMime: 'application/pdf' }),
+      'report.pdf',
+    );
+  });
+});
+
+test('createDocument broadcast derives extension from fileMime for extensionless name', async () => {
+  await withTmp(async (dir) => {
+    assert.equal(
+      await broadcastOriginalNameFor(dir, { name: 'Price list', fileMime: 'image/jpeg' }),
+      'Price list.jpg',
+    );
+    // No mapping for the mime → name left as-is.
+    assert.equal(
+      await broadcastOriginalNameFor(dir, { name: 'Price list', fileMime: 'application/octet-stream' }),
+      'Price list',
+    );
+  });
+});
+
+test('createDocument broadcast explicit fileName overrides name and fileMime', async () => {
+  await withTmp(async (dir) => {
+    assert.equal(
+      await broadcastOriginalNameFor(dir, { name: 'Price list', fileMime: 'application/pdf', fileName: 'catalog.docx' }),
+      'catalog.docx',
     );
   });
 });
