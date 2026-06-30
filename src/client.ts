@@ -583,25 +583,38 @@ export class Client {
     const created = await this.http.post(DOCUMENTS, { json: body });
     const doc = Document.fromApi(docObj(created), { decryptValue: this.decryptValue });
     const fileBytes = Buffer.from(opts.fileBytes);
-    if (perPerson) {
-      // EVERY per-person file doc is E2E-encrypted: wrap the file envelope string,
-      // encrypt it for the recipient, then POST {"value": "<wrapper JSON string>"}.
-      // The /file endpoint requires `value` to be a STRING (isValidEncryptedBlob),
-      // so the wrapper object is JSON.stringify'd; the bare wrapper was rejected (400).
-      const envelope = JSON.stringify({ file: dataUri(fileBytes, opts.fileMime) });
-      const wrapper = encryptForPublicKey(envelope, pubKey as KeyObject);
-      await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
-        json: { value: JSON.stringify(wrapper) },
-      });
-    } else {
-      // Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
-      // The API rejected the old raw-bytes body (documents.invalid_payload: file required).
-      await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
-        json: {
-          file: dataUri(fileBytes, opts.fileMime),
-          original_name: broadcastOriginalName(opts.fileName, opts.name, opts.fileMime),
-        },
-      });
+    // The metadata row exists before the bytes are uploaded; if the upload
+    // fails, best-effort delete it so a failed createDocument leaves no
+    // dangling {"_pending": true} document. Cleanup errors are swallowed and
+    // the ORIGINAL upload error is re-thrown.
+    try {
+      if (perPerson) {
+        // EVERY per-person file doc is E2E-encrypted: wrap the file envelope string,
+        // encrypt it for the recipient, then POST {"value": "<wrapper JSON string>"}.
+        // The /file endpoint requires `value` to be a STRING (isValidEncryptedBlob),
+        // so the wrapper object is JSON.stringify'd; the bare wrapper was rejected (400).
+        const envelope = JSON.stringify({ file: dataUri(fileBytes, opts.fileMime) });
+        const wrapper = encryptForPublicKey(envelope, pubKey as KeyObject);
+        await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
+          json: { value: JSON.stringify(wrapper) },
+        });
+      } else {
+        // Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
+        // The API rejected the old raw-bytes body (documents.invalid_payload: file required).
+        await this.http.post(`${DOCUMENTS}/${doc.id}/file`, {
+          json: {
+            file: dataUri(fileBytes, opts.fileMime),
+            original_name: broadcastOriginalName(opts.fileName, opts.name, opts.fileMime),
+          },
+        });
+      }
+    } catch (e) {
+      try {
+        await this.http.delete(`${DOCUMENTS}/${doc.id}`);
+      } catch {
+        // swallow cleanup errors — re-throw the original upload error below
+      }
+      throw e;
     }
     return doc;
   }

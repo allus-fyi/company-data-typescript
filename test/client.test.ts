@@ -547,6 +547,38 @@ test('createDocument file broadcast uploads file data URI', async () => {
   });
 });
 
+test('createDocument file upload failure rolls back the created document', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const { client, transport } = makeClientRw(config, NO_GET, (method, url) => {
+      if (method === 'POST' && url.endsWith('/documents')) {
+        return new FakeResponse(201, {
+          id: 'f1', kind: 'document', name: 'C', description: null, status: 'active',
+          payload_kind: 'file', is_private: false, value: { _pending: true }, metadata: null, created_at: null, updated_at: null,
+        });
+      }
+      if (url.endsWith('/documents/f1/file')) {
+        // Upload step fails — the just-created {"_pending": true} row must be cleaned up.
+        return new FakeResponse(500, { error_key: 'documents.upload_failed' });
+      }
+      // best-effort cleanup DELETE /documents/f1
+      return new FakeResponse(200, {});
+    });
+    // (a) createDocument rejects with the original upload error.
+    await assert.rejects(
+      () =>
+        client.createDocument({
+          name: 'C', payloadKind: 'file', fileBytes: Buffer.from('%PDF-1.4 x'), fileMime: 'application/pdf',
+        }),
+      ApiError,
+    );
+    // (b) a DELETE to /documents/f1 was issued (best-effort rollback).
+    assert.ok(
+      transport.requests.some((r) => r.method === 'DELETE' && r.url.endsWith('/documents/f1')),
+    );
+  });
+});
+
 /** Run a broadcast file createDocument and return the original_name the SDK sent. */
 async function broadcastOriginalNameFor(
   dir: string,
