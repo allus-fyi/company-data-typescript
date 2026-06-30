@@ -529,6 +529,10 @@ export class Client {
       target = { connection_id: opts.connectionId };
     } else if (opts.personUserId) {
       target = { person_user_id: opts.personUserId };
+    } else if (opts.shareCode) {
+      // A share_code target is PER-PERSON (encrypted to that recipient), not a
+      // broadcast. Without this it fell through to the plaintext all-recipients path.
+      target = { share_code: opts.shareCode };
     } // else: broadcast — target stays null
 
     const perPerson = target !== null;

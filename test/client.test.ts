@@ -479,6 +479,45 @@ test('createDocument per-person encrypts for BOTH is_private values', async () =
   });
 });
 
+test('createDocument with only shareCode is PER-PERSON (encrypted, not broadcast)', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const spki = vectorPubSpkiB64();
+    const priv = loadPrivateKey(vector.encrypted_private_key_pem, vector.passphrase);
+
+    let keysFetched = 0;
+    let captured: RequestBody | undefined;
+    const { client } = makeClientRw(
+      config,
+      (url) => {
+        assert.ok(url.endsWith('/api/keys/ABC123')); // (a) recipient key fetched by share code
+        keysFetched += 1;
+        return new FakeResponse(200, { public_key: spki });
+      },
+      (_method, _url, body) => {
+        captured = body;
+        const value = (body?.json as Record<string, unknown>)['value'];
+        return new FakeResponse(201, {
+          id: 'd3', kind: 'document', name: 'SC', description: null, status: 'active',
+          payload_kind: 'json', is_private: false, value, metadata: null, created_at: null, updated_at: null,
+        });
+      },
+    );
+    const doc = await client.createDocument({
+      name: 'SC', payloadKind: 'json', jsonValue: { plan: 'pro' },
+      shareCode: 'ABC123',
+    });
+    assert.equal(keysFetched, 1); // (a) the recipient key WAS fetched
+    const sent = captured?.json as Record<string, unknown>;
+    assert.deepEqual(sent['target'], { share_code: 'ABC123' }); // (b) per-person target, NOT null/broadcast
+    const val = sent['value'] as Record<string, unknown>;
+    assert.equal(val['_enc'], 1); // (c) ENCRYPTED wrapper, not plaintext
+    assert.ok(val['k'] && val['iv'] && val['d']);
+    assert.deepEqual(JSON.parse(decrypt(val as EncWrapper, priv)), { plan: 'pro' });
+    assert.equal(doc.id, 'd3');
+  });
+});
+
 test('createDocument private broadcast throws ConfigError', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);

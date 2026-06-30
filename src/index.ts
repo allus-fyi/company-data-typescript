@@ -90,4 +90,4 @@ export type { Headers } from './webhooks.js';
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 
-export const VERSION = '0.0.9'; // keep in sync with package.json
+export const VERSION = '0.0.10'; // keep in sync with package.json
