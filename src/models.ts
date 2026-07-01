@@ -277,6 +277,12 @@ export class Change {
     readonly action: string | null,
     /** Set on `document_status_changed` — the person's optional cancellation note (else null). */
     readonly note: string | null,
+    /** Set on a signature — sign method: biometric | twofa | email | custodian (else null). */
+    readonly method: string | null,
+    /** Set on a signature — SHA-256 of the signed content (else null). */
+    readonly contentSha256: string | null,
+    /** Set on a signature — ISO timestamp the signature was recorded (else null). */
+    readonly signedAt: string | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
     readonly at: Date | null,
@@ -311,6 +317,9 @@ export class Change {
     const statusRaw = event === 'document_status_changed' ? obj['status'] : null;
     const actionRaw = event === 'document_status_changed' ? obj['action'] : null;
     const noteRaw = event === 'document_status_changed' ? obj['note'] : null;
+    const methodRaw = event === 'document_status_changed' ? obj['method'] : null;
+    const contentSha256Raw = event === 'document_status_changed' ? obj['content_sha256'] : null;
+    const signedAtRaw = event === 'document_status_changed' ? obj['signed_at'] : null;
     const requestIdRaw =
       event === 'connection_request_accepted' || event === 'connection_request_rejected'
         ? obj['request_id']
@@ -327,6 +336,9 @@ export class Change {
       statusRaw != null ? String(statusRaw) : null,
       actionRaw != null ? String(actionRaw) : null,
       noteRaw != null ? String(noteRaw) : null,
+      methodRaw != null ? String(methodRaw) : null,
+      contentSha256Raw != null ? String(contentSha256Raw) : null,
+      signedAtRaw != null ? String(signedAtRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       parseIsoDate(obj['at']),
       obj,
