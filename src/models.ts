@@ -283,6 +283,8 @@ export class Change {
     readonly contentSha256: string | null,
     /** Set on a signature — ISO timestamp the signature was recorded (else null). */
     readonly signedAt: string | null,
+    /** Set on a cancelled `document_status_changed` — ISO date the cancellation takes effect (else null). */
+    readonly cancelEffectiveDate: string | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
     readonly at: Date | null,
@@ -320,6 +322,7 @@ export class Change {
     const methodRaw = event === 'document_status_changed' ? obj['method'] : null;
     const contentSha256Raw = event === 'document_status_changed' ? obj['content_sha256'] : null;
     const signedAtRaw = event === 'document_status_changed' ? obj['signed_at'] : null;
+    const cancelEffectiveDateRaw = event === 'document_status_changed' ? obj['cancel_effective_date'] : null;
     const requestIdRaw =
       event === 'connection_request_accepted' || event === 'connection_request_rejected'
         ? obj['request_id']
@@ -339,6 +342,7 @@ export class Change {
       methodRaw != null ? String(methodRaw) : null,
       contentSha256Raw != null ? String(contentSha256Raw) : null,
       signedAtRaw != null ? String(signedAtRaw) : null,
+      cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       parseIsoDate(obj['at']),
       obj,
