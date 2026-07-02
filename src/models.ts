@@ -508,6 +508,8 @@ export class FlowRun {
     readonly outputMode: string | null,
     readonly definition: Json,
     readonly answers: Json[],
+    /** Immutable run "today" (raw `YYYY-MM-DD` string), or null when absent. */
+    readonly referenceDate: string | null,
     readonly createdAt: Date | null,
     readonly updatedAt: Date | null,
     readonly raw: Json,
@@ -571,6 +573,7 @@ export class FlowRun {
       outputMode,
       definition,
       answers,
+      o['reference_date'] != null ? String(o['reference_date']) : null,
       parseIsoDate(o['created_at']),
       parseIsoDate(o['updated_at']),
       o,

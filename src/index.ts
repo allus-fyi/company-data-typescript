@@ -66,8 +66,13 @@ export {
 } from './models.js';
 export type { TypeForSlug } from './models.js';
 
-// contract-flow condition evaluator (port of the platform FlowConditionEvaluator)
-export { evaluateCondition } from './flowCondition.js';
+// contract-flow condition evaluator + computed constants (issue #79)
+export {
+  evaluateCondition,
+  computeConstants,
+  resolveConstants,
+  evaluateFlowCondition,
+} from './flowCondition.js';
 
 // changes pump
 export { FileBuffer } from './buffer.js';
