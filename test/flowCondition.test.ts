@@ -28,6 +28,6 @@ for (const c of cases) {
   });
 }
 
-test('flow condition vector has all 27 cases', () => {
-  assert.equal(cases.length, 27);
+test('flow condition vector has all 35 cases', () => {
+  assert.equal(cases.length, 35);
 });

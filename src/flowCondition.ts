@@ -45,6 +45,10 @@ export function evaluateCondition(condition: unknown, answers: Record<string, un
   if (op === 'empty') return !isAnswered(val);
   if (op === 'in') return Array.isArray(target) && target.some((x) => looseEq(x, val));
   if (op === 'nin') return !(Array.isArray(target) && target.some((x) => looseEq(x, val)));
+  // #102 substring ops (text): contains needs an answer (like in); not_contains is true when
+  // unanswered (like nin). Case-sensitive; empty needle counts as contained.
+  if (op === 'contains') return isAnswered(val) && str(val).includes(str(target));
+  if (op === 'not_contains') return !(isAnswered(val) && str(val).includes(str(target)));
 
   if (!isAnswered(val)) return false;
   if (op === 'eq') return looseEq(target, val);
