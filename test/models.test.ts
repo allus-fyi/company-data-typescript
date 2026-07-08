@@ -225,6 +225,45 @@ test('change includes share_code', () => {
   assert.equal(changes[1].shareCode, null);
 });
 
+test('request field includes audience (B2B #163)', () => {
+  const body = {
+    request_fields: [
+      { slug: 'billing', label: 'Billing', type: 'email', one_time: false, mandatory_provide: false, mandatory_connected: false, audience: 'company' },
+      { slug: 'ref', label: 'Ref', type: 'text', one_time: false, mandatory_provide: false, mandatory_connected: false },
+    ],
+  };
+  const fields = RequestField.listFromApi(body);
+  assert.equal(fields[0].audience, 'company');
+  assert.equal(fields[1].audience, null);
+});
+
+test('change includes customer_type (B2B #163)', () => {
+  const body = {
+    changes: [
+      { id: 'chg-1', event: 'connection_created', person_user_id: 'co-1', customer_type: 'company', at: '2026-07-07T12:00:00Z' },
+      { id: 'chg-2', event: 'connection_created', person_user_id: 'person-2', at: '2026-07-07T12:00:00Z' },
+    ],
+  };
+  const changes = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  assert.equal(changes[0].customerType, 'company');
+  assert.equal(changes[1].customerType, null);
+});
+
+test('connection includes customer_type + share_code (B2B #163)', () => {
+  const conn = Connection.fromApi(
+    { connection_id: 'c-1', user_id: 'co-9', customer_type: 'company', share_code: 'PARTNER', values: {} },
+    { typeForSlug: () => null, decryptValue },
+  );
+  assert.equal(conn.customerType, 'company');
+  assert.equal(conn.shareCode, 'PARTNER');
+  const bare = Connection.fromApi(
+    { connection_id: 'c-2', user_id: 'p-1', values: {} },
+    { typeForSlug: () => null, decryptValue },
+  );
+  assert.equal(bare.customerType, null);
+  assert.equal(bare.shareCode, null);
+});
+
 // ── document_status_changed change + Document model ─────────────────────────────
 
 /** Encrypt a plaintext FOR the vector key's public half (as GET /api/keys returns it). */

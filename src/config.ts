@@ -24,6 +24,8 @@ const ENV_MAP: Record<string, string> = {
   clientSecret: 'ALLUS_CLIENT_SECRET',
   servicePrivateKey: 'ALLUS_SERVICE_PRIVATE_KEY',
   keyPassphrase: 'ALLUS_KEY_PASSPHRASE',
+  customerClientId: 'ALLUS_CUSTOMER_CLIENT_ID',
+  customerClientSecret: 'ALLUS_CUSTOMER_CLIENT_SECRET',
   accountPrivateKey: 'ALLUS_ACCOUNT_PRIVATE_KEY',
   accountPassphrase: 'ALLUS_ACCOUNT_PASSPHRASE',
   cacheDir: 'ALLUS_CACHE_DIR',
@@ -38,6 +40,8 @@ const FILE_KEY: Record<string, string> = {
   clientSecret: 'client_secret',
   servicePrivateKey: 'service_private_key',
   keyPassphrase: 'key_passphrase',
+  customerClientId: 'customer_client_id',
+  customerClientSecret: 'customer_client_secret',
   accountPrivateKey: 'account_private_key',
   accountPassphrase: 'account_passphrase',
   cacheDir: 'cache_dir',
@@ -47,6 +51,8 @@ const FILE_KEY: Record<string, string> = {
 const WEBHOOK_SECRET_ENV = 'ALLUS_WEBHOOK_SECRET';
 
 const REQUIRED = ['apiUrl', 'clientId', 'clientSecret', 'servicePrivateKey', 'keyPassphrase'] as const;
+// Customer role (#168): the acct_* pair + the account key that decrypts received docs/flow copies.
+const REQUIRED_CUSTOMER = ['apiUrl', 'customerClientId', 'customerClientSecret', 'accountPrivateKey'] as const;
 
 const VALID_FORMATS: readonly WireFormat[] = ['json', 'xml'];
 
@@ -70,10 +76,12 @@ export type WebhookAuthMethod = 'hmac' | 'bearer' | 'basic' | 'header' | 'none';
 
 interface ConfigInit {
   apiUrl: string;
-  clientId: string;
-  clientSecret: string;
-  servicePrivateKey: string;
-  keyPassphrase: string;
+  clientId?: string | null;
+  clientSecret?: string | null;
+  servicePrivateKey?: string | null;
+  keyPassphrase?: string | null;
+  customerClientId?: string | null;
+  customerClientSecret?: string | null;
   accountPrivateKey?: string | null;
   accountPassphrase?: string | null;
   webhooks?: Record<string, string>;
@@ -88,10 +96,14 @@ interface ConfigInit {
 /** The whole SDK configuration. Keys live here and nowhere else. */
 export class Config {
   readonly apiUrl: string;
-  readonly clientId: string;
-  readonly clientSecret: string;
-  readonly servicePrivateKey: string; // path to the OpenSSL-encrypted PKCS#8 PEM
-  readonly keyPassphrase: string; // decrypts the service PEM in memory
+  // Service role — nullable so a CUSTOMER-role config can omit them.
+  readonly clientId: string | null;
+  readonly clientSecret: string | null;
+  readonly servicePrivateKey: string | null; // path to the OpenSSL-encrypted PKCS#8 PEM
+  readonly keyPassphrase: string | null; // decrypts the service PEM in memory
+  // Customer role (#168): the acct_* client pair the connecting company uses.
+  readonly customerClientId: string | null;
+  readonly customerClientSecret: string | null;
 
   // OPTIONAL — only needed if you receive encrypt_payload webhooks.
   readonly accountPrivateKey: string | null;
@@ -122,10 +134,12 @@ export class Config {
 
   constructor(init: ConfigInit) {
     this.apiUrl = init.apiUrl;
-    this.clientId = init.clientId;
-    this.clientSecret = init.clientSecret;
-    this.servicePrivateKey = init.servicePrivateKey;
-    this.keyPassphrase = init.keyPassphrase;
+    this.clientId = init.clientId ?? null;
+    this.clientSecret = init.clientSecret ?? null;
+    this.servicePrivateKey = init.servicePrivateKey ?? null;
+    this.keyPassphrase = init.keyPassphrase ?? null;
+    this.customerClientId = init.customerClientId ?? null;
+    this.customerClientSecret = init.customerClientSecret ?? null;
     this.accountPrivateKey = init.accountPrivateKey ?? null;
     this.accountPassphrase = init.accountPassphrase ?? null;
     this.webhooks = init.webhooks ?? {};
@@ -166,8 +180,38 @@ export class Config {
     return Config.build({});
   }
 
+  /** Load a CUSTOMER-role config (#168) from a JSON file — requires the acct_* pair
+   * + account key, not the service PEM. Env vars override file values. */
+  static fromCustomerFile(path: string): Config {
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (exc) {
+      const e = exc as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        throw new ConfigError(`config file not found: ${path}`);
+      }
+      throw new ConfigError(`could not read config file: ${path}: ${e.message}`);
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch (exc) {
+      throw new ConfigError(`config file is not valid JSON: ${path}: ${(exc as Error).message}`);
+    }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      throw new ConfigError(`config file must be a JSON object: ${path}`);
+    }
+    return Config.build(data as Record<string, unknown>, 'customer');
+  }
+
+  /** Build a CUSTOMER-role config entirely from `ALLUS_*` env vars. */
+  static fromCustomerEnv(): Config {
+    return Config.build({}, 'customer');
+  }
+
   /** Merge file values with env overrides, validate, and construct. */
-  private static build(data: Record<string, unknown>): Config {
+  private static build(data: Record<string, unknown>, role: 'service' | 'customer' = 'service'): Config {
     const values: Record<string, unknown> = {};
 
     // Scalar fields: env var (if set) overrides the file value.
@@ -246,7 +290,8 @@ export class Config {
 
     // Required fields (fail fast). Report by the config-file key
     // (snake_case) so the message is actionable for whoever wrote the file.
-    const missing = REQUIRED.filter((name) => {
+    const requiredSet = role === 'customer' ? REQUIRED_CUSTOMER : REQUIRED;
+    const missing = requiredSet.filter((name) => {
       const v = values[name];
       return v === undefined || v === null || v === '';
     }).map((name) => FILE_KEY[name]);

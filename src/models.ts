@@ -93,6 +93,8 @@ export class RequestField {
     readonly type: string,
     readonly oneTime: boolean,
     readonly mandatory: boolean,
+    /** Which customer TYPE this row applies to: "person" | "company" | "both" (B2B, #163); null on older API. */
+    readonly audience: string | null,
     readonly raw: Json,
   ) {}
 
@@ -103,6 +105,7 @@ export class RequestField {
       obj['type'] != null ? String(obj['type']) : '',
       Boolean(coerceBool(obj['one_time'])),
       Boolean(coerceBool(obj['mandatory_provide']) || coerceBool(obj['mandatory_connected'])),
+      obj['audience'] != null ? String(obj['audience']) : null,
       obj,
     );
   }
@@ -202,6 +205,10 @@ export class Connection {
     readonly displayName: string | null,
     readonly connectedAt: Date | null,
     readonly values: Record<string, Value>,
+    /** The connected customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
+    readonly customerType: string | null,
+    /** The customer's profile share code (previously only via `raw`); null when absent. */
+    readonly shareCode: string | null,
     readonly raw: Json,
   ) {}
 
@@ -245,7 +252,18 @@ export class Connection {
       }
     }
 
-    return new Connection(connId, personId, displayName, connectedAt, values, obj);
+    const customerTypeRaw = obj['customer_type'] ?? identity['customer_type'];
+    const shareCodeRaw = obj['share_code'] ?? identity['share_code'];
+    return new Connection(
+      connId,
+      personId,
+      displayName,
+      connectedAt,
+      values,
+      customerTypeRaw != null ? String(customerTypeRaw) : null,
+      shareCodeRaw != null ? String(shareCodeRaw) : null,
+      obj,
+    );
   }
 }
 
@@ -287,6 +305,8 @@ export class Change {
     readonly cancelEffectiveDate: string | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
+    /** The customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
+    readonly customerType: string | null,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -344,6 +364,7 @@ export class Change {
       signedAtRaw != null ? String(signedAtRaw) : null,
       cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
+      obj['customer_type'] != null ? String(obj['customer_type']) : null,
       parseIsoDate(obj['at']),
       obj,
     );

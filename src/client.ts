@@ -893,6 +893,9 @@ export class Client {
 
 /** Read the configured encrypted PEM and decrypt it with the passphrase (once). */
 function loadServiceKey(config: Config): KeyObject {
+  if (!config.servicePrivateKey) {
+    throw new ConfigError('servicePrivateKey is required for a service-role client');
+  }
   let pemBytes: Buffer;
   try {
     pemBytes = readFileSync(config.servicePrivateKey);
@@ -902,7 +905,7 @@ function loadServiceKey(config: Config): KeyObject {
     );
   }
   try {
-    return loadPrivateKey(pemBytes, config.keyPassphrase);
+    return loadPrivateKey(pemBytes, config.keyPassphrase ?? '');
   } catch (exc) {
     if (exc instanceof DecryptError) {
       // A bad passphrase / malformed PEM is a configuration problem (fail fast).

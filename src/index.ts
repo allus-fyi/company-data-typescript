@@ -20,6 +20,16 @@
 export { Client } from './client.js';
 export type { ClientOptions } from './client.js';
 
+// Customer role (b2b, #168)
+export { CustomerClient } from './customer.js';
+export type {
+  CustomerClientOptions,
+  CustomerConnection,
+  CustomerServiceLink,
+  TypedAnswer,
+  FlowParty,
+} from './customer.js';
+
 // config
 export { Config, SINGLE_WEBHOOK_KEY } from './config.js';
 export type { WireFormat, WebhookBasic, WebhookHeader, WebhookAuthMethod } from './config.js';
@@ -95,4 +105,4 @@ export type { Headers } from './webhooks.js';
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 
-export const VERSION = '0.0.11'; // keep in sync with package.json
+export const VERSION = '0.0.12'; // keep in sync with package.json

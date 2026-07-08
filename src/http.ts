@@ -183,8 +183,8 @@ export class HttpClient {
         url,
         {
           grant_type: 'client_credentials',
-          client_id: this.config.clientId,
-          client_secret: this.config.clientSecret,
+          client_id: this.config.clientId ?? '',
+          client_secret: this.config.clientSecret ?? '',
         },
         { Accept: 'application/json' },
       );
