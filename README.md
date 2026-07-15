@@ -381,7 +381,8 @@ source slug, no `field_id`, not even via `.raw`.
 
 | Field type | JS `value` |
 |------------|------------|
-| `email`, `phone`, `url`, `text` | `string` |
+| `email`, `phone`, `url`, `text` | `string` — `phone` is a single E.164-style string (`+` and digits) |
+| `country`, `nationality` | `string` — an ISO 3166-1 alpha-2 code (e.g. `'US'`, `'NL'`); not a display name |
 | `address`, `bank`, `creditcard` | a parsed `object` — the decrypted plaintext is a JSON object, parsed for you |
 | `date`, `date_of_birth` | a `Date` (UTC midnight; falls back to the raw string if it can't be parsed) |
 | `photo`, `document`, `legal_document` | a lazy `BinaryHandle` — see below |
@@ -391,6 +392,12 @@ source slug, no `field_id`, not even via `.raw`.
 const addr = conn.values['home_address'].value as Record<string, unknown>; // {street, city, …}
 const dob  = conn.values['birthday'].value as Date;                          // Date(1990-05-17)
 ```
+
+`country`/`nationality` values are 2-letter ISO codes, and an `address`'s
+`country`/`state` sub-fields are an ISO alpha-2 code / USPS 2-letter state code
+respectively. `isFieldValueValid(type, value)` validates these against the
+bundled country dataset; `isValidCountryCode(code)` / `dialCodeFor(code)` check a
+code or look up its E.164 dial code.
 
 ### Binary fields — the lazy `BinaryHandle`
 

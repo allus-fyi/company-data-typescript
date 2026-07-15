@@ -59,7 +59,12 @@ export {
 } from './errors.js';
 
 // field-type value validation (#302)
-export { isFieldValueValid, fieldValueError } from './fieldValidation.js';
+export {
+  isFieldValueValid,
+  fieldValueError,
+  isValidCountryCode,
+  dialCodeFor,
+} from './fieldValidation.js';
 
 // transport
 export { HttpClient, FetchTransport } from './http.js';

@@ -14,6 +14,13 @@
  * surfaces only (never on share / propagate).
  */
 
+import { COUNTRY_CODES, DIAL_CODES, US_STATE_CODES } from './countryData';
+
+// #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
+// The code lists come from the generated country data (do NOT inline them — they would rot).
+const COUNTRY_CODE_SET = new Set(COUNTRY_CODES);
+const US_STATE_CODE_SET = new Set(US_STATE_CODES);
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_RE = /^https?:\/\/[^\s/$.?#][^\s]*\.[^\s]{2,}$/i;
 const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/;
@@ -28,7 +35,8 @@ type SubRule = { re?: RegExp; int?: boolean; kind?: string };
 const OBJ: Record<string, Record<string, SubRule>> = {
   address: {
     postal_code: { re: /^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$/ },
-    street: {}, building_number: {}, affix: {}, city: {}, state: {}, country: {},
+    country: { kind: 'countryCode' }, state: { kind: 'usState' },
+    street: {}, building_number: {}, affix: {}, city: {},
   },
   creditcard: {
     number: { kind: 'card' },
@@ -55,7 +63,7 @@ type Rule =
   | { kind: 'regex'; re: RegExp }
   | { kind: 'enum'; values: string[] }
   | { kind: 'object' }
-  | { kind: 'phone' | 'url' | 'date' | 'number' | 'boolean' };
+  | { kind: 'phone' | 'url' | 'date' | 'number' | 'boolean' | 'countryCode' };
 
 const RULES: Record<string, Rule> = {
   email: { kind: 'regex', re: EMAIL_RE },
@@ -66,6 +74,7 @@ const RULES: Record<string, Rule> = {
   address: { kind: 'object' }, creditcard: { kind: 'object' }, bank: { kind: 'object' },
   document: { kind: 'object' }, legal_document: { kind: 'object' },
   number: { kind: 'number' }, boolean: { kind: 'boolean' },
+  country: { kind: 'countryCode' }, nationality: { kind: 'countryCode' },
   // text + unknown => no rule => accept anything
 };
 
@@ -119,6 +128,10 @@ function applyKind(kind: string, value: string): boolean {
       return value.trim() !== '' && Number.isFinite(Number(value));
     case 'boolean':
       return value === 'true' || value === 'false';
+    case 'countryCode':
+      return COUNTRY_CODE_SET.has(value);
+    case 'usState':
+      return US_STATE_CODE_SET.has(value);
     default:
       return true;
   }
@@ -170,4 +183,14 @@ export function isFieldValueValid(type: string | null | undefined, value: unknow
 /** `null` when valid, else the `type` tag (callers map to `field_invalid_<type>`). */
 export function fieldValueError(type: string | null | undefined, value: unknown): string | null {
   return isFieldValueValid(type, value) ? null : type ?? '';
+}
+
+/** True if `code` is an assigned ISO 3166-1 alpha-2 country code (#303). */
+export function isValidCountryCode(code: string | null | undefined): boolean {
+  return code != null && COUNTRY_CODE_SET.has(code);
+}
+
+/** The ITU E.164 dial code (digits only, no `+`) for a country code, or `null` (#303). */
+export function dialCodeFor(code: string | null | undefined): string | null {
+  return (code != null && DIAL_CODES[code]) || null;
 }
