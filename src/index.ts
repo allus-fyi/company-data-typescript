@@ -55,7 +55,11 @@ export {
   DecryptError,
   WebhookError,
   RateLimitError,
+  ValidationError,
 } from './errors.js';
+
+// field-type value validation (#302)
+export { isFieldValueValid, fieldValueError } from './fieldValidation.js';
 
 // transport
 export { HttpClient, FetchTransport } from './http.js';
@@ -105,4 +109,4 @@ export type { Headers } from './webhooks.js';
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 
-export const VERSION = '0.0.12'; // keep in sync with package.json
+export const VERSION = '0.0.13'; // keep in sync with package.json

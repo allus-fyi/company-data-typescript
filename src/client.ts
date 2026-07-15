@@ -48,7 +48,8 @@ import {
   loadPublicKey,
   type EncWrapper,
 } from './crypto.js';
-import { ApiError, ConfigError, DecryptError, RateLimitError } from './errors.js';
+import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError } from './errors.js';
+import { isFieldValueValid } from './fieldValidation.js';
 import { evaluateCondition } from './flowCondition.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
@@ -809,6 +810,13 @@ export class Client {
     const answersOut: Json[] = [];
     for (const [slug, val] of Object.entries(fill)) {
       const plain = typeof val === 'string' ? val : JSON.stringify(val);
+      // #302: validate the plaintext against the field's declared type (resolved from the
+      // pinned flow definition) before it is encrypted. A slug with no field element in the
+      // graph resolves to null → skipped (do not invent a type).
+      const ftype = flowFieldType(run.definition, slug);
+      if (ftype !== null && !isFieldValueValid(ftype, plain)) {
+        throw new ValidationError(slug, ftype);
+      }
       const values: Json[] = [];
       for (const uid of Object.values(run.bindings)) {
         const key =
@@ -976,6 +984,34 @@ function computeNext(
 function partyOf(definition: Json, nodeKey: string): string | null {
   const node = nodeByKey(definition, nodeKey);
   return node && node['party'] != null ? String(node['party']) : null;
+}
+
+/**
+ * Resolve a fill slug to its `field_type` from the pinned flow graph (#302).
+ * Scans every node's `elements` for a `kind='field'` element with a matching
+ * `slug`. Returns `null` when the slug has no field element (skip validation —
+ * never invent a type).
+ */
+function flowFieldType(definition: Json, slug: string): string | null {
+  const nodes = definition['nodes'];
+  if (!Array.isArray(nodes)) return null;
+  for (const n of nodes) {
+    if (n === null || typeof n !== 'object') continue;
+    const els = (n as Json)['elements'];
+    if (!Array.isArray(els)) continue;
+    for (const el of els) {
+      if (
+        el !== null &&
+        typeof el === 'object' &&
+        (el as Json)['kind'] === 'field' &&
+        (el as Json)['slug'] === slug
+      ) {
+        const ft = (el as Json)['field_type'];
+        return ft != null ? String(ft) : null;
+      }
+    }
+  }
+  return null;
 }
 
 /** Build a `data:<mime>;base64,<…>` URI for the per-person file envelope. */

@@ -16,7 +16,8 @@ import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
 import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
-import { ConfigError } from './errors.js';
+import { ConfigError, ValidationError } from './errors.js';
+import { isFieldValueValid } from './fieldValidation.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { Change, Document, FlowRun } from './models.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
@@ -127,6 +128,9 @@ export class CustomerClient {
   private readonly accountKey: KeyObject | null;
   private readonly pubKeyCache = new Map<string, KeyObject | null>();
   private readonly serviceKeyCache = new Map<string, KeyObject | null>();
+  // "companyCode/serviceCode" → {request_field_id: field_type}, resolved from the
+  // connect-screen lookup for typed-answer validation (#302).
+  private readonly requestTypeCache = new Map<string, Record<string, string>>();
   private _pump: Pump | null = null;
 
   constructor(config: Config, opts: CustomerClientOptions = {}) {
@@ -361,6 +365,32 @@ export class CustomerClient {
     return cryptoDecrypt(wrapper, this.accountKey);
   }
 
+  /**
+   * Resolve `{request_field_id: field_type}` for a service from the connect-screen
+   * lookup, cached per company/service. Best-effort — a lookup failure yields an empty
+   * map so typed-answer validation is simply skipped (#302).
+   */
+  private async requestFieldTypes(companyCode: string, serviceCode: string): Promise<Record<string, string>> {
+    const key = `${companyCode}/${serviceCode}`;
+    const cached = this.requestTypeCache.get(key);
+    if (cached) return cached;
+    const out: Record<string, string> = {};
+    try {
+      const body = (await this.http.get(`${CONN}/lookup/${companyCode}/${serviceCode}`)) as Record<string, unknown>;
+      const rows = (body?.['request_fields'] as Record<string, unknown>[]) ?? [];
+      for (const r of rows) {
+        if (!r || typeof r !== 'object') continue;
+        const id = r['id'];
+        const ft = r['field_type'] ?? r['type'];
+        if (typeof id === 'string' && id && typeof ft === 'string' && ft) out[id] = ft;
+      }
+    } catch {
+      // best-effort — a failed lookup skips validation
+    }
+    this.requestTypeCache.set(key, out);
+    return out;
+  }
+
   private async encryptTyped(
     answers: TypedAnswer[],
     companyCode: string,
@@ -368,11 +398,22 @@ export class CustomerClient {
   ): Promise<Record<string, unknown>[]> {
     const pub = await this.serviceKey(companyCode, serviceCode);
     if (!pub) throw new ConfigError(`no service key for ${companyCode}/${serviceCode}`);
-    return answers.map((a) => ({
-      request_field_id: a.request_field_id,
-      kind: a.kind ?? 'typed',
-      value: encryptForPublicKey(String(a.value), pub),
-    }));
+    // #302: validate each typed answer against its request row's field type BEFORE
+    // encryption. The type is resolved server-side from the connect-screen lookup
+    // (cached per service); an answer whose type can't be resolved is skipped.
+    const types = await this.requestFieldTypes(companyCode, serviceCode);
+    return answers.map((a) => {
+      const plain = String(a.value);
+      const ft = types[a.request_field_id];
+      if (ft && !isFieldValueValid(ft, plain)) {
+        throw new ValidationError(a.request_field_id, ft);
+      }
+      return {
+        request_field_id: a.request_field_id,
+        kind: a.kind ?? 'typed',
+        value: encryptForPublicKey(plain, pub),
+      };
+    });
   }
 
   private async serviceKey(companyCode: string, serviceCode: string): Promise<KeyObject | null> {

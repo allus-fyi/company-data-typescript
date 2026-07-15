@@ -70,6 +70,23 @@ export class ApiError extends AllusError {
 export class WebhookError extends AllusError {}
 
 /**
+ * A submitted value failed field-type validation (#302) before encryption.
+ *
+ * Carries the offending field `slug` and its `fieldType` so the caller can point
+ * at the bad answer without shipping malformed ciphertext.
+ */
+export class ValidationError extends AllusError {
+  readonly slug: string | null;
+  readonly fieldType: string | null;
+
+  constructor(slug: string | null, fieldType: string | null) {
+    super(`invalid ${fieldType} value for '${slug ?? 'value'}'`);
+    this.slug = slug;
+    this.fieldType = fieldType;
+  }
+}
+
+/**
  * A 429 from a rate-limited endpoint.
  *
  * Subclass of {@link ApiError} with a fixed status of 429; carries the
