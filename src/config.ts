@@ -28,6 +28,12 @@ const ENV_MAP: Record<string, string> = {
   customerClientSecret: 'ALLUS_CUSTOMER_CLIENT_SECRET',
   accountPrivateKey: 'ALLUS_ACCOUNT_PRIVATE_KEY',
   accountPassphrase: 'ALLUS_ACCOUNT_PASSPHRASE',
+  // "Sign in with allme" idw role (#195).
+  oauthClientId: 'ALLUS_OAUTH_CLIENT_ID',
+  oauthRedirectUri: 'ALLUS_OAUTH_REDIRECT_URI',
+  oauthClientSecret: 'ALLUS_OAUTH_CLIENT_SECRET',
+  oauthPrivateKey: 'ALLUS_OAUTH_PRIVATE_KEY',
+  oauthKeyPassphrase: 'ALLUS_OAUTH_KEY_PASSPHRASE',
   cacheDir: 'ALLUS_CACHE_DIR',
   format: 'ALLUS_FORMAT',
 };
@@ -44,6 +50,11 @@ const FILE_KEY: Record<string, string> = {
   customerClientSecret: 'customer_client_secret',
   accountPrivateKey: 'account_private_key',
   accountPassphrase: 'account_passphrase',
+  oauthClientId: 'oauth_client_id',
+  oauthRedirectUri: 'oauth_redirect_uri',
+  oauthClientSecret: 'oauth_client_secret',
+  oauthPrivateKey: 'oauth_private_key',
+  oauthKeyPassphrase: 'oauth_key_passphrase',
   cacheDir: 'cache_dir',
   format: 'format',
 };
@@ -53,6 +64,9 @@ const WEBHOOK_SECRET_ENV = 'ALLUS_WEBHOOK_SECRET';
 const REQUIRED = ['apiUrl', 'clientId', 'clientSecret', 'servicePrivateKey', 'keyPassphrase'] as const;
 // Customer role (#168): the acct_* pair + the account key that decrypts received docs/flow copies.
 const REQUIRED_CUSTOMER = ['apiUrl', 'customerClientId', 'customerClientSecret', 'accountPrivateKey'] as const;
+// "Sign in with allme" idw role (#195): only the client id + redirect are required. The app private
+// key + passphrase are needed lazily (one_time value decryption), checked in OAuthClient.
+const REQUIRED_IDW = ['apiUrl', 'oauthClientId', 'oauthRedirectUri'] as const;
 
 const VALID_FORMATS: readonly WireFormat[] = ['json', 'xml'];
 
@@ -84,6 +98,11 @@ interface ConfigInit {
   customerClientSecret?: string | null;
   accountPrivateKey?: string | null;
   accountPassphrase?: string | null;
+  oauthClientId?: string | null;
+  oauthRedirectUri?: string | null;
+  oauthClientSecret?: string | null;
+  oauthPrivateKey?: string | null;
+  oauthKeyPassphrase?: string | null;
   webhooks?: Record<string, string>;
   webhookBearerToken?: string | null;
   webhookBasic?: WebhookBasic | null;
@@ -108,6 +127,14 @@ export class Config {
   // OPTIONAL — only needed if you receive encrypt_payload webhooks.
   readonly accountPrivateKey: string | null;
   readonly accountPassphrase: string | null;
+
+  // "Sign in with allme" idw role (#195). The idw_* app the RP embeds; the private key +
+  // passphrase are needed only to decrypt one_time claim values (config-only key handling).
+  readonly oauthClientId: string | null;
+  readonly oauthRedirectUri: string | null;
+  readonly oauthClientSecret: string | null;
+  readonly oauthPrivateKey: string | null;
+  readonly oauthKeyPassphrase: string | null;
 
   // OPTIONAL — per-webhook HMAC secrets keyed by webhook id; matched via the
   // X-Allus-Webhook-Id header. A single-webhook service can use the flat
@@ -142,6 +169,11 @@ export class Config {
     this.customerClientSecret = init.customerClientSecret ?? null;
     this.accountPrivateKey = init.accountPrivateKey ?? null;
     this.accountPassphrase = init.accountPassphrase ?? null;
+    this.oauthClientId = init.oauthClientId ?? null;
+    this.oauthRedirectUri = init.oauthRedirectUri ?? null;
+    this.oauthClientSecret = init.oauthClientSecret ?? null;
+    this.oauthPrivateKey = init.oauthPrivateKey ?? null;
+    this.oauthKeyPassphrase = init.oauthKeyPassphrase ?? null;
     this.webhooks = init.webhooks ?? {};
     this.webhookBearerToken = init.webhookBearerToken ?? null;
     this.webhookBasic = init.webhookBasic ?? null;
@@ -210,8 +242,38 @@ export class Config {
     return Config.build({}, 'customer');
   }
 
+  /** Load an IDW-role config (#195, "Sign in with allme") from a JSON file — requires the
+   * oauth_client_id + oauth_redirect_uri. Env vars override file values. */
+  static fromIdwFile(path: string): Config {
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (exc) {
+      const e = exc as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        throw new ConfigError(`config file not found: ${path}`);
+      }
+      throw new ConfigError(`could not read config file: ${path}: ${e.message}`);
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch (exc) {
+      throw new ConfigError(`config file is not valid JSON: ${path}: ${(exc as Error).message}`);
+    }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      throw new ConfigError(`config file must be a JSON object: ${path}`);
+    }
+    return Config.build(data as Record<string, unknown>, 'idw');
+  }
+
+  /** Build an IDW-role config entirely from `ALLUS_*` env vars. */
+  static fromIdwEnv(): Config {
+    return Config.build({}, 'idw');
+  }
+
   /** Merge file values with env overrides, validate, and construct. */
-  private static build(data: Record<string, unknown>, role: 'service' | 'customer' = 'service'): Config {
+  private static build(data: Record<string, unknown>, role: 'service' | 'customer' | 'idw' = 'service'): Config {
     const values: Record<string, unknown> = {};
 
     // Scalar fields: env var (if set) overrides the file value.
@@ -290,7 +352,7 @@ export class Config {
 
     // Required fields (fail fast). Report by the config-file key
     // (snake_case) so the message is actionable for whoever wrote the file.
-    const requiredSet = role === 'customer' ? REQUIRED_CUSTOMER : REQUIRED;
+    const requiredSet = role === 'idw' ? REQUIRED_IDW : role === 'customer' ? REQUIRED_CUSTOMER : REQUIRED;
     const missing = requiredSet.filter((name) => {
       const v = values[name];
       return v === undefined || v === null || v === '';
@@ -317,6 +379,11 @@ export class Config {
       keyPassphrase: String(values['keyPassphrase']),
       accountPrivateKey: values['accountPrivateKey'] !== undefined ? String(values['accountPrivateKey']) : null,
       accountPassphrase: values['accountPassphrase'] !== undefined ? String(values['accountPassphrase']) : null,
+      oauthClientId: values['oauthClientId'] !== undefined ? String(values['oauthClientId']) : null,
+      oauthRedirectUri: values['oauthRedirectUri'] !== undefined ? String(values['oauthRedirectUri']) : null,
+      oauthClientSecret: values['oauthClientSecret'] !== undefined ? String(values['oauthClientSecret']) : null,
+      oauthPrivateKey: values['oauthPrivateKey'] !== undefined ? String(values['oauthPrivateKey']) : null,
+      oauthKeyPassphrase: values['oauthKeyPassphrase'] !== undefined ? String(values['oauthKeyPassphrase']) : null,
       webhooks: hasWebhooks ? webhooks : {},
       webhookBearerToken,
       webhookBasic,

@@ -111,6 +111,17 @@ export type {
 export { verifyWebhook, parseWebhook, handleWebhook, loadAccountKey } from './webhooks.js';
 export type { Headers } from './webhooks.js';
 
+// "Sign in with allme" — RP-side OAuth (#195)
+export { OAuthClient, DEFAULT_AUTHORIZE_URL } from './oauth.js';
+export type {
+  Claim,
+  SignInMode,
+  ResponseMode,
+  AuthorizeUrlOptions,
+  OAuthClientOptions,
+  SignInResult,
+} from './oauth.js';
+
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 

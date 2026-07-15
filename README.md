@@ -824,3 +824,16 @@ cross-language decryption vector — PEM-load (PBES2 / PBKDF2-SHA256 / AES-256-C
 plus an independent OpenSSL cross-check (anti-circularity). The full test suite
 (config, crypto, http/auth, models, the crash-safe pump, webhooks, and the XXE-safe
 XML parser) is green under `npm test`.
+
+## Sign in with allme (OAuth, #195)
+
+```ts
+import { OAuthClient } from '@allus-fyi/company-data';
+
+const oauth = OAuthClient.fromConfig('idw-config.json');
+const url = oauth.authorizeUrl('signin', { state, codeChallenge });   // the button target
+// ...user approves; your redirect receives ?code=...
+const { user, mode, values } = await oauth.completeSignIn(code, verifier);
+```
+
+Modes: `signin` | `one_time` (claim values decrypted for you) | `connect`. `pollResult(state)` drives the detached mode.
