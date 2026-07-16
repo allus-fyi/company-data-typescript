@@ -40,6 +40,7 @@ import {
   randomBytes,
   constants as cryptoConstants,
   type KeyObject,
+  createHash,
 } from 'node:crypto';
 import { renameSync, unlinkSync, writeFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -392,4 +393,19 @@ export class BinaryHandle {
     }
     return data.length;
   }
+}
+
+
+/**
+ * #311 verified fields: true iff sha256(salt ‖ plaintext) === expectedHash (hex).
+ * Consumers recompute this from the plaintext they just decrypted and trust the
+ * verified flag ONLY on a match — a substituted/drifted value renders unverified.
+ */
+export function hashMatches(salt: string, expectedHash: string, plaintext: string): boolean {
+  if (!salt || !expectedHash) return false;
+  const computed = createHash('sha256').update(salt + plaintext, 'utf8').digest('hex');
+  if (computed.length !== expectedHash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ expectedHash.charCodeAt(i);
+  return diff === 0;
 }

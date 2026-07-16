@@ -29,7 +29,7 @@
  * `binaryFetch` callable — never a key/secret argument.
  */
 
-import { BinaryHandle, DecryptError, type BinaryFetch, type DecryptWrapper, type EncWrapper } from './crypto.js';
+import { BinaryHandle, DecryptError, type BinaryFetch, type DecryptWrapper, type EncWrapper, hashMatches } from './crypto.js';
 
 /** Field types whose decrypted plaintext is a JSON object → a parsed object. */
 export const STRUCTURED_TYPES = ['address', 'bank', 'creditcard'] as const;
@@ -127,11 +127,21 @@ export class RequestField {
  * `updatedAt` = when this answer last changed. Both ride on the Value (per-answer),
  * not the definition.
  */
+/** #311: recompute the verified flag from the just-decrypted plaintext (email string only). */
+function verifiedFrom(obj: Json, plaintext: unknown): boolean {
+  if (typeof plaintext !== 'string') return false;
+  const vhash = obj['verified_hash'];
+  const vsalt = obj['verified_salt'];
+  if (typeof vhash !== 'string' || typeof vsalt !== 'string' || !vhash || !vsalt) return false;
+  return hashMatches(vsalt, vhash, plaintext);
+}
+
 export class Value {
   constructor(
     readonly value: unknown,
     readonly live: boolean,
     readonly updatedAt: Date | null,
+    readonly verified: boolean,
     readonly raw: Json,
   ) {}
 
@@ -143,7 +153,7 @@ export class Value {
     const live = Boolean(coerceBool(obj['live']));
     const updatedAt = parseIsoDate(obj['updatedAt'] ?? obj['updated_at']);
     const typed = typedValue(obj, opts);
-    return new Value(typed, live, updatedAt, obj);
+    return new Value(typed, live, updatedAt, verifiedFrom(obj, typed), obj);
   }
 }
 
@@ -307,6 +317,8 @@ export class Change {
     readonly requestId: string | null,
     /** The customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
     readonly customerType: string | null,
+    /** #311: true iff a field_updated value is verified (hash matches the decrypted plaintext). */
+    readonly verified: boolean,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -365,6 +377,7 @@ export class Change {
       cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       obj['customer_type'] != null ? String(obj['customer_type']) : null,
+      verifiedFrom(obj, value),
       parseIsoDate(obj['at']),
       obj,
     );
