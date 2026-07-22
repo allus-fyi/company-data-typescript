@@ -317,6 +317,8 @@ export class Change {
     readonly requestId: string | null,
     /** The customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
     readonly customerType: string | null,
+    /** #344: set on `key_rotated` — SHA-256 fingerprint of the person's NEW public key (else null). */
+    readonly publicKeySha256: string | null,
     /** #311: true iff a field_updated value is verified (hash matches the decrypted plaintext). */
     readonly verified: boolean,
     readonly at: Date | null,
@@ -377,6 +379,9 @@ export class Change {
       cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       obj['customer_type'] != null ? String(obj['customer_type']) : null,
+      event === 'key_rotated' && obj['public_key_sha256'] != null
+        ? String(obj['public_key_sha256'])
+        : null,
       verifiedFrom(obj, value),
       parseIsoDate(obj['at']),
       obj,

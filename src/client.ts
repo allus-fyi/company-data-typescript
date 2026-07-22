@@ -117,7 +117,19 @@ export class Client {
 
   // Recipient RSA public keys (by shareCode) — cached for per-person document
   // encryption. A public key is immutable + not a secret (fetched live, never configured).
+  /**
+   * #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+   *
+   * JavaScript is single-threaded but NOT interleaving-free: the fetch path awaits an HTTP call
+   * between the cache check and the store, and `invalidatePublicKey` — which the README tells
+   * webhook consumers to call from their own handler — can run in that window. Its delete is then
+   * silently undone by the store that follows, the `key_rotated` event has already been consumed,
+   * and with no TTL the process encrypts to the dead key for the rest of its life.
+   *
+   * The fetch snapshots the generation before awaiting and stores only if it is still current.
+   */
   private pubKeyCache: Map<string, KeyObject> = new Map();
+  private pubKeyGen: Map<string, number> = new Map();
 
   // The service RSA public key (public half of the loaded private key), derived once.
   private servicePubKey: KeyObject | null = null;
@@ -352,7 +364,33 @@ export class Client {
     return items.filter((o): o is Record<string, unknown> => o !== null && typeof o === 'object' && !Array.isArray(o));
   }
 
+  /**
+   * #344 — drop a person's cached RSA public key, by share code.
+   *
+   * A public key is immutable, so caching one is safe until the person rotates it. Persons learn
+   * about a rotation from a silent push; a SERVICE gets no pushes at all, so without a signal a
+   * long-lived worker could keep encrypting documents to the rotated-away key for the whole
+   * process lifetime.
+   *
+   * The changes feed calls this for you. Call it yourself when consuming changes over a WEBHOOK —
+   * the verifier is a standalone function with no client instance, so it cannot reach this cache:
+   * on a `key_rotated` webhook, call `client.invalidatePublicKey(change.shareCode)`.
+   */
+  invalidatePublicKey(shareCode: string): void {
+    this.pubKeyCache.delete(shareCode);
+    // Any fetch already in flight must not write its stale result back.
+    this.pubKeyGen.set(shareCode, (this.pubKeyGen.get(shareCode) ?? 0) + 1);
+  }
+
   private decryptChange(event: Record<string, unknown>): Change {
+    // #344: the feed is a service's only rotation signal. Deliberately eventual — nothing rejects
+    // a document encrypted to a stale key, so a window remains until this event is drained.
+    // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+    // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
+    if ((event.event === 'key_rotated' || event.action === 'key_rotated')
+      && typeof event.share_code === 'string' && event.share_code) {
+      this.invalidatePublicKey(event.share_code);
+    }
     return Change.fromApi(event, {
       typeForSlug: this.typeForSlug,
       decryptValue: this.decryptValue,
@@ -427,6 +465,7 @@ export class Client {
   private async recipientPublicKey(shareCode: string): Promise<KeyObject> {
     const cached = this.pubKeyCache.get(shareCode);
     if (cached !== undefined) return cached;
+    const gen = this.pubKeyGen.get(shareCode) ?? 0;
     const body = await this.http.get(`${KEYS}/${shareCode}`);
     const spki =
       body !== null && typeof body === 'object' && !Array.isArray(body)
@@ -436,7 +475,8 @@ export class Client {
       throw new ApiError(0, 'keys.not_found', `no public_key for share_code ${shareCode}`);
     }
     const key = loadPublicKey(spki);
-    this.pubKeyCache.set(shareCode, key);
+    // Store ONLY if no invalidation happened while the request was in flight.
+    if ((this.pubKeyGen.get(shareCode) ?? 0) === gen) this.pubKeyCache.set(shareCode, key);
     return key;
   }
 
