@@ -139,7 +139,12 @@ export class CustomerClient {
    */
   private readonly pubKeyCache = new Map<string, KeyObject | null>();
   private readonly pubKeyGen = new Map<string, number>();
+  /**
+   * #411: the SERVICE's public key, keyed "companyCode/serviceCode", with the same generation
+   * guard as `pubKeyGen` above — see that comment for why the counter is not optional here.
+   */
   private readonly serviceKeyCache = new Map<string, KeyObject | null>();
+  private readonly serviceKeyGen = new Map<string, number>();
   // "companyCode/serviceCode" → {request_field_id: field_type}, resolved from the
   // connect-screen lookup for typed-answer validation (#302).
   private readonly requestTypeCache = new Map<string, Record<string, string>>();
@@ -333,6 +338,21 @@ export class CustomerClient {
     this.pubKeyGen.set(userId, (this.pubKeyGen.get(userId) ?? 0) + 1);
   }
 
+  /**
+   * #411 — drop a SERVICE's cached RSA public key, so the next answer/document you encrypt to it
+   * refetches. The mirror of {@link invalidatePublicKey}, in the service→customer direction.
+   *
+   * The changes feed calls this for you on a `service_key_rotated` event. Webhook consumers must
+   * call it themselves from their handler, with the event body's `company_share_code` and
+   * `service_share_code` — the webhook verifier is standalone and has no client instance to reach
+   * this cache through.
+   */
+  invalidateServiceKey(companyCode: string, serviceCode: string): void {
+    const key = `${companyCode}/${serviceCode}`;
+    this.serviceKeyCache.delete(key);
+    this.serviceKeyGen.set(key, (this.serviceKeyGen.get(key) ?? 0) + 1);
+  }
+
   private decryptChange(event: Record<string, unknown>): Change {
     // #344: this cache also stores a negative (null) result, so without invalidation a person who
     // had not generated keys yet would stay unresolvable for the process lifetime as well.
@@ -341,6 +361,16 @@ export class CustomerClient {
     if (event.event === 'key_rotated' || event.action === 'key_rotated') {
       const id = event.person_user_id ?? event.person_id;
       if (typeof id === 'string' && id) this.invalidatePublicKey(id);
+    }
+    // #411: a service this customer connects to replaced its keypair — drop the cached copy so the
+    // next encryption refetches. Same either-key match as above: the pull feed names it `event`,
+    // a raw webhook body names it `action`.
+    if (event.event === 'service_key_rotated' || event.action === 'service_key_rotated') {
+      const company = event.company_share_code;
+      const service = event.service_share_code;
+      if (typeof company === 'string' && company && typeof service === 'string' && service) {
+        this.invalidateServiceKey(company, service);
+      }
     }
     return Change.fromApi(event, {
       typeForSlug: () => null,
@@ -448,12 +478,14 @@ export class CustomerClient {
 
   private async serviceKey(companyCode: string, serviceCode: string): Promise<KeyObject | null> {
     const key = `${companyCode}/${serviceCode}`;
-    if (!this.serviceKeyCache.has(key)) {
-      const body = (await this.http.get(`${KEYS}/${companyCode}/${serviceCode}`)) as Record<string, unknown>;
-      const spki = body?.['public_key'] as string | undefined;
-      this.serviceKeyCache.set(key, spki ? loadPublicKey(spki) : null);
-    }
-    return this.serviceKeyCache.get(key) ?? null;
+    if (this.serviceKeyCache.has(key)) return this.serviceKeyCache.get(key) ?? null;
+    const gen = this.serviceKeyGen.get(key) ?? 0;
+    const body = (await this.http.get(`${KEYS}/${companyCode}/${serviceCode}`)) as Record<string, unknown>;
+    const spki = body?.['public_key'] as string | undefined;
+    const loaded = spki ? loadPublicKey(spki) : null;
+    // #411: store ONLY if no invalidation happened while the request was in flight.
+    if ((this.serviceKeyGen.get(key) ?? 0) === gen) this.serviceKeyCache.set(key, loaded);
+    return loaded;
   }
 
   private async batchKey(userId: string): Promise<KeyObject | null> {
