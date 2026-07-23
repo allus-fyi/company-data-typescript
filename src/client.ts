@@ -52,6 +52,7 @@ import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError } 
 import { isFieldValueValid } from './fieldValidation.js';
 import { evaluateCondition } from './flowCondition.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
+import { TwoFactorClient } from './twoFactor.js';
 import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
 import { createCipheriv, createPublicKey, randomBytes } from 'node:crypto';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
@@ -151,6 +152,12 @@ export class Client {
     // every encrypt_payload webhook so we don't re-read the PEM + re-run PBKDF2
     // (~100k iters) per request — same one-time-load discipline as the service key.
     this.accountKey = loadAccountKey(config);
+  }
+
+  /** #436 2FA-by-allme — the relying-party challenge API (`twoFactor.challenge` / `twoFactor.result`). */
+  private _twoFactor?: TwoFactorClient;
+  get twoFactor(): TwoFactorClient {
+    return (this._twoFactor ??= new TwoFactorClient(this.http));
   }
 
   // ── constructors (config-only keys) ────────────────────────────────────────

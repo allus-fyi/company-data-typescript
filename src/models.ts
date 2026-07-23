@@ -350,7 +350,10 @@ export class Change {
     const personIdRaw = obj['person_user_id'] ?? obj['person_id'];
     const shareCodeRaw = obj['share_code'];
     const documentIdRaw = obj['document_id'];
-    const statusRaw = event === 'document_status_changed' ? obj['status'] : null;
+    // #436: `2fa_challenge_completed` carries the outcome in `status` (approved | denied | revoked);
+    // its `challenge_id` and `completed_at` stay available on `raw`. The poll is the record (spec §3).
+    const statusRaw =
+      event === 'document_status_changed' || event === '2fa_challenge_completed' ? obj['status'] : null;
     const actionRaw = event === 'document_status_changed' ? obj['action'] : null;
     const noteRaw = event === 'document_status_changed' ? obj['note'] : null;
     const methodRaw = event === 'document_status_changed' ? obj['method'] : null;
