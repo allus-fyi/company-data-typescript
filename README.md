@@ -748,6 +748,7 @@ plaintext.
 ```ts
 listDocuments(opts?: { personUserId?; status?; limit?; offset? }): Promise<Document[]>
 document(documentId): Promise<Document>
+documentFile(documentId): Promise<Buffer>                       // #491: the file BYTES
 updateDocumentStatus(documentId, status): Promise<Document>     // offering|ready_to_sign|active|active_but_ending|ended
 updateDocumentMetadata(documentId, { metadata?, name?, description? }): Promise<Document>
 deleteDocument(documentId): Promise<void>                       // also removes the on-disk file
@@ -765,6 +766,22 @@ await client.deleteDocument(notice.id);
 
 A `Document` is `{ id, kind, name, description, status, payloadKind, isPrivate,
 value, metadata, createdAt, updatedAt, raw }` with a `.json()` helper for json docs.
+
+* `listDocuments(opts)` filters optionally by `personUserId` and/or `status` and pages with `limit`/`offset`.
+* `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).
+* `documentFile(id)` (#491) downloads a `'file'` document's BYTES — the metadata methods don't include them. A **broadcast** (plaintext) document's bytes are returned as-is; a **per-person / private** document is encrypted to the *recipient's* key (not your service key), so `documentFile` fails clearly with `documents.recipient_encrypted` (`ApiError`) rather than a doomed decrypt. For a generated flow contract's own copy use `flowRunDocument(runId)` below (that copy IS service-key-encrypted).
+
+### Contract flows & identity (#491)
+
+```ts
+flowRunAnswers(run: FlowRun | string): Promise<Record<string, unknown>>  // gap 1 — a completed run's DECRYPTED answers {slug: plaintext}
+flowRunDocument(runId): Promise<Buffer>                                  // gap 2 — the company's own copy of a run's generated contract (plaintext bytes)
+identity(): Promise<{ company_user_id: string; service_id: string }>     // gap 3 — this client's own identity
+```
+
+* `flowRunAnswers(run)` returns a completed run's decrypted `{slug: plaintext}` answers (accepts a fetched `FlowRun` or a run id). It is the public accessor for a finished run's answers, which `processFlowRun` returns untouched.
+* `flowRunDocument(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (a 404 `ApiError` until the run generates a document) — the honest completion step (fill → complete → `flowRunAnswers` → `flowRunDocument`).
+* `identity()` returns this client's `{ company_user_id, service_id }` from `GET /api/company-data/whoami`, so a `triggerFlowRun` binding's **company** party can bind to `company_user_id` (the person party's user_id comes from the connection).
 
 ### Reacting to status changes in the pump
 

@@ -43,6 +43,13 @@ const MAX_BACKOFF_S = 60.0;
 export interface HttpResponse {
   status: number;
   text(): Promise<string>;
+  /**
+   * Optional raw-bytes accessor, used by {@link HttpClient.getRaw} for a binary-safe
+   * body read (no UTF-8 decode). Optional so existing test doubles that only
+   * implement `text()` keep type-checking; the native Fetch API `Response` (the
+   * default transport) satisfies this structurally for free.
+   */
+  arrayBuffer?(): Promise<ArrayBuffer>;
   /** Case-insensitive header lookup, returning `null` when absent (Fetch `Headers`). */
   headers: { get(name: string): string | null };
 }
@@ -247,6 +254,17 @@ export class HttpClient {
     return this.request('GET', path, { params });
   }
 
+  /**
+   * GET `path` → the RAW 2xx response body bytes, with NO JSON/XML parse.
+   *
+   * For downloading bytes whose body may be non-JSON (e.g. a broadcast document's
+   * plaintext file) — see {@link Client.documentFile}. Auth/refresh/retry handling
+   * is identical to {@link get}.
+   */
+  async getRaw(path: string): Promise<Buffer> {
+    return this.request('GET', path, { rawResponse: true }) as Promise<Buffer>;
+  }
+
   /** POST `path` with a JSON body or raw bytes → parsed body. */
   async post(
     path: string,
@@ -282,6 +300,8 @@ export class HttpClient {
       json?: unknown;
       raw?: Buffer | Uint8Array | string;
       contentType?: string;
+      /** When true, a 2xx response returns raw bytes (no JSON/XML parse) — see {@link getRaw}. */
+      rawResponse?: boolean;
     } = {},
   ): Promise<unknown> {
     const url = this.url(path);
@@ -313,7 +333,7 @@ export class HttpClient {
       const status = resp.status;
 
       if (status >= 200 && status < 300) {
-        return this.parseBody(resp, wantsXml);
+        return opts.rawResponse ? this.readRawBody(resp) : this.parseBody(resp, wantsXml);
       }
 
       if (status === 401) {
@@ -359,6 +379,14 @@ export class HttpClient {
       return path;
     }
     return this.apiUrl + (path.startsWith('/') ? '' : '/') + path;
+  }
+
+  /** Binary-safe raw-body read for {@link getRaw}: prefers `arrayBuffer()`, falls back to `text()`. */
+  private async readRawBody(resp: HttpResponse): Promise<Buffer> {
+    if (typeof resp.arrayBuffer === 'function') {
+      return Buffer.from(await resp.arrayBuffer());
+    }
+    return Buffer.from(await resp.text(), 'utf-8');
   }
 
   private async parseBody(resp: HttpResponse, wantsXml: boolean): Promise<unknown> {

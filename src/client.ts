@@ -42,6 +42,7 @@ import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
 import {
+  BinaryHandle,
   decrypt as cryptoDecrypt,
   encryptForPublicKey,
   loadPrivateKey,
@@ -694,6 +695,35 @@ export class Client {
   }
 
   /**
+   * #491 gap 2: download a document's file BYTES. {@link document} returns metadata only. This GETs
+   * `/documents/{id}/file`, which branches on the document's storage mode (server contract):
+   *  - a BROADCAST (non-private) document is stored plaintext and served as RAW bytes → returned as-is;
+   *  - a PER-PERSON / private document is encrypted to the RECIPIENT's key and served as
+   *    `{"encrypted":true,"value":{"_enc":1,…}}` — the company CANNOT decrypt that with its service key,
+   *    so this fails clearly (`ApiError` `documents.recipient_encrypted`) rather than attempting a doomed
+   *    service-key decrypt. For a generated flow contract's OWN copy the company uses
+   *    {@link flowRunDocument} — that copy IS service-key-encrypted.
+   */
+  async documentFile(documentId: string): Promise<Buffer> {
+    const raw = await this.http.getRaw(`${DOCUMENTS}/${documentId}/file`);
+    let decoded: unknown = null;
+    try {
+      decoded = JSON.parse(raw.toString('utf-8'));
+    } catch {
+      decoded = null;
+    }
+    if (decoded !== null && typeof decoded === 'object' && (decoded as Record<string, unknown>)['encrypted']) {
+      throw new ApiError(
+        0,
+        'documents.recipient_encrypted',
+        'This document is encrypted to its recipient and is not readable with the company service key. ' +
+          'For a generated flow contract, use flowRunDocument(runId) to download the company copy.',
+      );
+    }
+    return raw; // broadcast / plaintext bytes
+  }
+
+  /**
    * Set a document's lifecycle status
    * (offering|ready_to_sign|active|active_but_ending|ended).
    */
@@ -778,6 +808,47 @@ export class Client {
   async flowRun(runId: string): Promise<FlowRun> {
     const body = await this.http.get(`${FLOW_RUNS}/${runId}`);
     return FlowRun.fromApi(asJson(body));
+  }
+
+  /**
+   * #491 gap 1: a completed run's DECRYPTED answers as `{ slug: plaintext }`. Accepts a loaded
+   * {@link FlowRun} or a run id (fetched via {@link flowRun}). The public accessor for a finished
+   * run's answers; the private {@link decryptRunAnswers} it wraps is otherwise reached only inside
+   * {@link processFlowRun}, which returns an already-completed run untouched, so those answers were
+   * previously unreadable.
+   */
+  async flowRunAnswers(run: FlowRun | string): Promise<Record<string, unknown>> {
+    const flowRun = run instanceof FlowRun ? run : await this.flowRun(run);
+    return this.decryptRunAnswers(flowRun);
+  }
+
+  /**
+   * #491 gap 2: download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
+   * file bytes. GETs `/flow-runs/{runId}/document/file`, which serves the company-party copy encrypted
+   * to the SERVICE key (unlike {@link documentFile}'s recipient-targeted copy), so the same
+   * {@link BinaryHandle} the slot-file download uses decrypts it → the `{"file":"data:…;base64,…"}`
+   * envelope → the file bytes. A 404 (no document generated yet) propagates as a normal {@link ApiError}.
+   */
+  async flowRunDocument(runId: string): Promise<Buffer> {
+    return new BinaryHandle({
+      valueUrl: `${BASE}/flow-runs/${runId}/document/file`,
+      fetch: this.binaryFetch,
+      decrypt: this.decryptValue,
+    }).bytes();
+  }
+
+  /**
+   * #491 gap 3: this client's OWN identity — `{ company_user_id, service_id }` from
+   * `GET /api/company-data/whoami`. The COMPANY party of a {@link triggerFlowRun} binding must bind
+   * to `company_user_id` (the person party's user_id comes from the connection), so without this the
+   * company-side binding was unconstructible through the SDK.
+   */
+  async identity(): Promise<{ company_user_id: string; service_id: string }> {
+    const body = asJson(await this.http.get(`${BASE}/whoami`));
+    return {
+      company_user_id: String(body['company_user_id'] ?? ''),
+      service_id: String(body['service_id'] ?? ''),
+    };
   }
 
   /**
