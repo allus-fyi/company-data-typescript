@@ -251,6 +251,33 @@ test('429 exhausts retries then raises RateLimitError', async () => {
   });
 });
 
+test('429 pending_cap surfaces immediately without retry', async () => {
+  await withTmp(async (dir) => {
+    // #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once
+    // as ApiError, NOT go through the Retry-After backoff (which every other 429 gets).
+    const t = new FakeTransport();
+    t.postResponses = [tokenOk()];
+    t.getResponses = [
+      new FakeResponse(429, { headers: { 'Retry-After': '2' }, jsonBody: { error_key: 'twofa.pending_cap' } }),
+      new FakeResponse(200, { jsonBody: { should: 'not be reached' } }),
+    ];
+    const sleeps: number[] = [];
+    const c = makeClient(dir, t, 'json', sleeps);
+    await assert.rejects(
+      () => c.get('/api/service-2fa/challenges'),
+      (e) => {
+        assert.ok(e instanceof ApiError);
+        assert.ok(!(e instanceof RateLimitError)); // not the backoff/RateLimitError path
+        assert.equal(e.status, 429);
+        assert.equal(e.errorKey, 'twofa.pending_cap');
+        return true;
+      },
+    );
+    assert.deepEqual(sleeps, []); // no backoff sleep
+    assert.equal(t.gets.length, 1); // no retry — the 200 was never consumed
+  });
+});
+
 test('429 default backoff when no Retry-After', async () => {
   await withTmp(async (dir) => {
     const t = new FakeTransport();

@@ -157,7 +157,7 @@ export class Client {
   /** #436 2FA-by-allme — the relying-party challenge API (`twoFactor.challenge` / `twoFactor.result`). */
   private _twoFactor?: TwoFactorClient;
   get twoFactor(): TwoFactorClient {
-    return (this._twoFactor ??= new TwoFactorClient(this.http));
+    return (this._twoFactor ??= new TwoFactorClient(this.http, { sleep: this.sleep }));
   }
 
   // ── constructors (config-only keys) ────────────────────────────────────────

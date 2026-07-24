@@ -7,7 +7,10 @@
  * state delivers it and burns it (a later read is `gone`). A webhook (`2fa_challenge_completed`) is the
  * push equivalent — best-effort; the poll remains authoritative.
  */
-import type { HttpClient } from './http.js';
+import { ApiError } from './errors.js';
+import type { HttpClient, Sleep } from './http.js';
+
+const defaultSleep: Sleep = (seconds) => new Promise((res) => setTimeout(res, Math.max(0, seconds) * 1000));
 
 export interface TwoFactorChallenge {
   /** Opaque challenge id — pass to {@link TwoFactorClient.result}. */
@@ -39,8 +42,23 @@ export interface ChallengeOptions {
   idempotencyKey: string;
 }
 
+export interface WaitForResultOptions {
+  /** Seconds to keep polling before giving up (default 600). */
+  timeout?: number;
+  /** Seconds between polls (default 2). */
+  interval?: number;
+}
+
 export class TwoFactorClient {
-  constructor(private readonly http: HttpClient) {}
+  private readonly sleep: Sleep;
+
+  // `sleep` is injectable so waitForResult is unit-testable without real delays (matches OAuthClient).
+  constructor(
+    private readonly http: HttpClient,
+    opts: { sleep?: Sleep } = {},
+  ) {
+    this.sleep = opts.sleep ?? defaultSleep;
+  }
 
   /** Initiate a login-approval challenge for the person behind `shareCode`. */
   async challenge(shareCode: string, opts: ChallengeOptions): Promise<TwoFactorChallenge> {
@@ -69,5 +87,29 @@ export class TwoFactorClient {
       expiresAt: body.expires_at != null ? String(body.expires_at) : null,
       completedAt: body.completed_at != null ? String(body.completed_at) : null,
     };
+  }
+
+  /**
+   * Poll {@link result} until the status is terminal (no longer `pending`) and return that first
+   * terminal {@link TwoFactorResult}.
+   *
+   * Convenience over a manual {@link result} loop (#481; mirrors the OAuth `pollResult` precedent).
+   * Because the first terminal read burns the challenge, this returns as soon as the status leaves
+   * `pending` — it never re-reads a consumed result. Rejects with {@link ApiError} if `timeout`
+   * seconds elapse while still pending; `interval` is the seconds between polls.
+   */
+  async waitForResult(challengeId: string, opts: WaitForResultOptions = {}): Promise<TwoFactorResult> {
+    const timeout = opts.timeout ?? 600;
+    const interval = opts.interval ?? 2;
+    const deadline = Date.now() + timeout * 1000;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const res = await this.result(challengeId);
+      if (res.status !== 'pending') return res;
+      if (Date.now() >= deadline) {
+        throw new ApiError(0, null, `2FA challenge ${challengeId} not completed within ${timeout}s`);
+      }
+      await this.sleep(interval);
+    }
   }
 }

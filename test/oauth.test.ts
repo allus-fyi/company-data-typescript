@@ -192,3 +192,31 @@ test('pollResult expired throws', async () => {
   const c = new OAuthClient(idwCfg(), { transport: t, sleep: async () => {} });
   await assert.rejects(() => c.pollResult('DET1', { interval: 0.01, timeout: 5 }), (e: unknown) => e instanceof ApiError && (e as ApiError).status === 410);
 });
+
+// ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────────
+test('authorizeUrl accepts 2fa_enroll mode', () => {
+  const c = new OAuthClient(idwCfg());
+  const { q } = parseUrl(c.authorizeUrl('2fa_enroll', { responseMode: 'detached', state: 'EN1' }));
+  assert.equal(q.get('mode'), '2fa_enroll');
+  assert.equal(q.get('response_mode'), 'detached');
+});
+
+test('pollResult pending then enrolled', async () => {
+  // #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. pollResult must
+  // return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
+  const t = new FakeTransport();
+  t.queuePost(new FakeResponse(202), new FakeResponse(200, { enrolled: true, state: 'EN1' }));
+  const c = new OAuthClient(idwCfg(), { transport: t, sleep: async () => {} });
+  const res = await c.pollResult('EN1', { interval: 0.01, timeout: 5 });
+  assert.equal(res.enrolled, true);
+  assert.equal(res.state, 'EN1');
+  assert.equal(t.posts.length, 2); // returned on first delivery, never polled past it
+});
+
+test('pollResult still returns on code after enroll change', async () => {
+  // Regression: the enroll addition must not break the sign-in `code` delivery.
+  const t = new FakeTransport();
+  t.queuePost(new FakeResponse(200, { code: 'AUTHCODE', state: 'DET1' }));
+  const c = new OAuthClient(idwCfg(), { transport: t, sleep: async () => {} });
+  assert.equal((await c.pollResult('DET1', { interval: 0.01, timeout: 5 })).code, 'AUTHCODE');
+});

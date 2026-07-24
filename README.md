@@ -913,4 +913,46 @@ const url = oauth.authorizeUrl('signin', { state, codeChallenge });   // the but
 const { user, mode, values } = await oauth.completeSignIn(code, verifier);
 ```
 
-Modes: `signin` | `one_time` (claim values decrypted for you) | `connect`. `pollResult(state)` drives the detached mode.
+Modes: `signin` | `one_time` (claim values decrypted for you) | `connect` |
+`2fa_enroll` (opt a person into 2FA — see below). `pollResult(state)` drives the detached mode.
+
+## 2FA by allme (#436, #481)
+
+Ask a connected person to approve a login inside the allme app. On the same service data client (no new
+config), via the `twoFactor` sub-client:
+
+```ts
+import { Client } from '@allus-fyi/company-data';
+
+const client = Client.fromConfig('allus.json');
+
+// Raise a challenge. `idempotencyKey` is REQUIRED — a repeat with the same key within the TTL returns the
+// SAME challenge and sends no second push. `context` is plain text shown on the person's card.
+const ch = await client.twoFactor.challenge('2I6UF3', {
+  idempotencyKey: 'login-8f3c1a',
+  context: 'Sign-in from Chrome',
+});
+if (ch.matchingDigits) {                       // number matching is on for this service
+  showOnLoginPage(ch.matchingDigits);          // the person types these back into the app; the server checks them
+}
+
+// Wait for the terminal outcome — polls result() for you (defaults: 600s timeout, 2s interval),
+// rejects with ApiError on timeout.
+const res = await client.twoFactor.waitForResult(ch.challengeId);   // or result(ch.challengeId) to poll once yourself
+if (res.status === 'approved') grantLogin();
+```
+
+- **Burn-on-read.** The first read of a terminal state (`approved` | `denied` | `expired` | `revoked`)
+  delivers it and burns it — a later read is `gone`. Read it once and persist your own outcome;
+  `waitForResult` returns that first terminal read and never re-reads a consumed challenge.
+- **Webhook variant.** The `2fa_challenge_completed` change/webhook carries the same terminal `status`, so a
+  webhook consumer need not poll. **Expiry fires no webhook/Change** — only `approved`/`denied`/`revoked`
+  reach the feed, so a lapsed challenge is observable only by polling.
+- **Enrollment.** Only an enrolled person can be challenged (an un-enrolled `share_code` is `404`).
+  Enrollment is a one-time consent on the `web.allme.fyi/auth` surface via the OAuth helper's `2fa_enroll`
+  mode — a redirect button (`oauth.authorizeUrl('2fa_enroll', { state })`), or server-to-server with
+  `{ responseMode: 'detached' }` + `pollResult(state)`, which returns `{ enrolled: true, state }` once the
+  person confirms.
+- **Errors.** `404` (unknown / not-enrolled share code). A `429` is either the plain rate limit (retried with
+  backoff → `RateLimitError`) or `twofa.pending_cap` (too many challenges already open for this person) — the
+  latter surfaces immediately as `ApiError` and is never retried, since a retry cannot clear it.

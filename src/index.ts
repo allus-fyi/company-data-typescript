@@ -22,7 +22,7 @@ export type { ClientOptions } from './client.js';
 
 // #436 2FA-by-allme — the relying-party challenge API (client.twoFactor).
 export { TwoFactorClient } from './twoFactor.js';
-export type { TwoFactorChallenge, TwoFactorResult, ChallengeOptions } from './twoFactor.js';
+export type { TwoFactorChallenge, TwoFactorResult, ChallengeOptions, WaitForResultOptions } from './twoFactor.js';
 
 // Customer role (b2b, #168)
 export { CustomerClient } from './customer.js';

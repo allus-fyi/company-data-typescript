@@ -21,7 +21,7 @@ export const DEFAULT_AUTHORIZE_URL = 'https://web.allme.fyi/auth';
 
 const NON_CLAIMABLE = new Set(['photo', 'document', 'legal_document']);
 const MAX_CLAIMS = 15;
-const MODES = new Set(['signin', 'one_time', 'connect']);
+const MODES = new Set(['signin', 'one_time', 'connect', '2fa_enroll']);
 const RESPONSE_MODES = new Set(['redirect', 'detached']);
 
 /** A one_time claim the RP asks for: a field TYPE + an advisory suggestion. */
@@ -32,7 +32,7 @@ export interface Claim {
   label?: string;
 }
 
-export type SignInMode = 'signin' | 'one_time' | 'connect';
+export type SignInMode = 'signin' | 'one_time' | 'connect' | '2fa_enroll';
 export type ResponseMode = 'redirect' | 'detached';
 
 export interface AuthorizeUrlOptions {
@@ -90,7 +90,7 @@ export class OAuthClient {
   /** Build the consent-screen URL — the "Sign in with allme" button target. */
   authorizeUrl(mode: SignInMode, opts: AuthorizeUrlOptions = {}): string {
     if (!MODES.has(mode)) {
-      throw new ConfigError(`invalid mode '${mode}' (expected signin | one_time | connect)`);
+      throw new ConfigError(`invalid mode '${mode}' (expected signin | one_time | connect | 2fa_enroll)`);
     }
     const responseMode = opts.responseMode ?? 'redirect';
     if (!RESPONSE_MODES.has(responseMode)) {
@@ -186,7 +186,13 @@ export class OAuthClient {
     return out;
   }
 
-  /** Poll /oauth2/result for a detached sign-in (single-delivery). */
+  /**
+   * Poll /oauth2/result for a detached sign-in or enrollment (single-delivery).
+   *
+   * A detached sign-in returns `{code, state}`; a detached `2fa_enroll` returns
+   * `{enrolled: true, state}` (#481). Returns on the first delivered shape (`code` OR
+   * `enrolled`) and never polls past it, so a one-shot enrollment result is not consumed and lost.
+   */
   async pollResult(state: string, opts: { timeout?: number; interval?: number } = {}): Promise<Record<string, unknown>> {
     const timeout = opts.timeout ?? 600;
     const interval = opts.interval ?? 2;
@@ -198,7 +204,11 @@ export class OAuthClient {
       const resp = await this.transport.post(`${this.apiUrl}/oauth2/result`, form, { Accept: 'application/json' });
       if (resp.status === 200) {
         const body = await this.json(resp);
-        if (body.code) return body;
+        // #481: return on the first delivered terminal shape — a sign-in `code` OR a
+        // `2fa_enroll` `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
+        // returning here (rather than looping) is what keeps an enrollment result from being
+        // consumed and lost to a timeout.
+        if (body.code || body.enrolled) return body;
       } else if (resp.status === 410) {
         throw new ApiError(410, 'oauth.result_expired', 'detached sign-in expired before completion');
       } else if (resp.status !== 202) {
