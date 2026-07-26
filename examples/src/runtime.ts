@@ -14,52 +14,72 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 /**
- * Cross-request state for the demo backend (contract §"Backend state", config-file model).
+ * Cross-request state for the ONE example-test-suite backend (contract §"Backend state", config-file
+ * model). The single server serves all three scenario families (identity / flow / company-data) off ONE
+ * `.runtime/` tree; every config/run/meta file is keyed by the PUBLIC scenario id, so the three families
+ * never collide.
  *
  * SINGLE-worker server (Node's built-in http = one process) → requests serialize; there is NO
  * concurrency to guard, so there are NO locks, NO tombstones and NO burn-on-read. Everything lives
  * under {@link runtimeDir} (git-ignored, wiped at startup):
- *   - config/{id}.json       — the canonical SDK config file a scenario runs OFF (written by
- *                              POST /api/scenarios/{id}/config from the browser settings; NOT TTL-swept)
- *   - config/{id}.meta.json  — demo-only run parameters that are not SDK Config fields
- *                              (authorizeBase, one_time claims, shareCode, context)
- *   - config/keys/<sha1>.pem — the private-key file(s) a config references by path (mode 0600)
- *   - runs/{runId}.json      — PKCE verifier / state / nonce / outcome for one run
+ *   - config/{sid}.json       — the canonical SDK config file a scenario runs OFF (written by
+ *                               POST /api/scenarios/{id}/config from the browser settings; NOT TTL-swept)
+ *   - config/{sid}.meta.json  — demo-only run parameters that are not SDK Config fields (identity's
+ *                               authorizeBase / one_time claims / shareCode; flow's flow_id / connection_id
+ *                               / fixture; company-data's documents share_code / webhook id)
+ *   - config/keys/<sha1>.pem  — the private-key file(s) a config references by path (mode 0600)
+ *   - runs/{runId}.json       — one run's PKCE/state/nonce/outcome or accumulated result + calls
+ *   - webhook-route.json      — the SINGLE active company-data webhook run: {webhookId, runId}
+ *   - cache/                  — the SDK pump's buffer + dead-letter dir (Config.cacheDir), wiped by Clear
  *
- * Config files persist across runs — they are configuration, not runs, so they are removed ONLY by a
- * Clear or the startup wipe, never by the TTL. Run files are written via write-temp + atomic rename
- * (crash hygiene only) and removed by their 30-minute TTL (lazy sweep on any request, which also
- * collects orphaned *.tmp files), by Clear, or by the startup wipe.
+ * {@link sid} is a filesystem-safe token of the scenario's public id (e.g. "companydata:read" →
+ * "companydata_read", "flow:run" → "flow_run", identity "1" → "1"). Config files persist across runs —
+ * they are configuration, not runs, so they are removed ONLY by a Clear or the startup wipe, never by the
+ * TTL. Run files are written via write-temp + atomic rename (crash hygiene only) and removed by their
+ * 30-minute TTL (lazy sweep on any request, which also collects orphaned *.tmp files), by Clear, or by the
+ * startup wipe.
  */
 export const TTL_MS = 30 * 60 * 1000; // 30-minute run TTL. Config files are exempt.
 
 export type RunRecord = Record<string, unknown> & {
-  scenario?: number;
+  scenario?: number | string;
   status?: string;
   calls?: string[];
 };
+
+export type Route = { webhookId: string; runId: string };
 
 export class Runtime {
   readonly runtimeDir: string;
   readonly runsDir: string;
   readonly configDir: string;
   readonly configKeysDir: string;
+  /** The SDK pump's buffer + dead-letter dir (Config.cacheDir → this path), wiped by Clear / startup. */
+  readonly cacheDir: string;
+  readonly routePath: string;
 
   constructor(baseDir: string) {
     this.runtimeDir = join(baseDir, '.runtime');
     this.runsDir = join(this.runtimeDir, 'runs');
     this.configDir = join(this.runtimeDir, 'config');
     this.configKeysDir = join(this.configDir, 'keys');
+    this.cacheDir = join(this.runtimeDir, 'cache');
+    this.routePath = join(this.runtimeDir, 'webhook-route.json');
+  }
+
+  /** Filesystem-safe token for a scenario id (e.g. "companydata:read" → "companydata_read", "1" → "1"). */
+  static sid(scenarioId: string): string {
+    return scenarioId.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
   }
 
   /** Ensure the runtime directories exist (idempotent). */
   ensureDirs(): void {
-    for (const d of [this.runtimeDir, this.runsDir, this.configDir, this.configKeysDir]) {
+    for (const d of [this.runtimeDir, this.runsDir, this.configDir, this.configKeysDir, this.cacheDir]) {
       if (!existsSync(d)) mkdirSync(d, { recursive: true, mode: 0o700 });
     }
   }
 
-  /** Startup wipe: remove ALL runtime state (configs + keys + runs), then recreate the empty tree. */
+  /** Startup wipe: remove ALL runtime state (configs + keys + runs + cache + route), then recreate. */
   wipeAll(): void {
     rmSync(this.runtimeDir, { recursive: true, force: true });
     this.ensureDirs();
@@ -68,8 +88,9 @@ export class Runtime {
   // ── lazy TTL sweep ──────────────────────────────────────────────────────
 
   /**
-   * Remove expired run files and orphaned *.tmp files. Called on every request (contract §backend state).
-   * Config files carry NO TTL — they are wiped only at startup or by Clear.
+   * Remove expired run files and orphaned *.tmp files. Called on every request. When the active webhook
+   * run expires, its routing record is dropped too (a stale record never routes to a burned run). Config
+   * files carry NO TTL — they are wiped only at startup or by Clear.
    */
   sweep(): void {
     const now = Date.now();
@@ -83,19 +104,24 @@ export class Runtime {
         this.tryUnlink(path);
       }
     }
+    // Drop the routing record if its run is gone (expired/swept above).
+    const route = this.readRoute();
+    if (route !== null && !existsSync(join(this.runsDir, `${route.runId}.json`))) {
+      this.tryUnlink(this.routePath);
+    }
   }
 
   // ── config files ────────────────────────────────────────────────────────
 
-  configPathFor(id: number): string {
-    return join(this.configDir, `${id}.json`);
+  configPathFor(id: string): string {
+    return join(this.configDir, `${Runtime.sid(id)}.json`);
   }
 
-  metaPathFor(id: number): string {
-    return join(this.configDir, `${id}.meta.json`);
+  metaPathFor(id: string): string {
+    return join(this.configDir, `${Runtime.sid(id)}.meta.json`);
   }
 
-  hasConfig(id: number): boolean {
+  hasConfig(id: string): boolean {
     return existsSync(this.configPathFor(id));
   }
 
@@ -103,25 +129,25 @@ export class Runtime {
    * Write a scenario's canonical SDK config file (config endpoint). Atomic write-temp + rename.
    * Returns the RELATIVE path (for display/inspection in the setup panel).
    */
-  writeConfig(id: number, config: Record<string, unknown>): string {
+  writeConfig(id: string, config: Record<string, unknown>): string {
     this.ensureDirs();
     this.atomicWrite(this.configPathFor(id), JSON.stringify(config, null, 2));
-    return `.runtime/config/${id}.json`;
+    return `.runtime/config/${Runtime.sid(id)}.json`;
   }
 
-  /** Write a scenario's demo-only meta sidecar (authorizeBase, claims, shareCode, context). */
-  writeConfigMeta(id: number, meta: Record<string, unknown>): void {
+  /** Write a scenario's demo-only meta sidecar. */
+  writeConfigMeta(id: string, meta: Record<string, unknown>): void {
     this.ensureDirs();
     this.atomicWrite(this.metaPathFor(id), JSON.stringify(meta, null, 2));
   }
 
   /** Read a scenario's meta sidecar; {} when absent. */
-  readConfigMeta(id: number): Record<string, unknown> {
+  readConfigMeta(id: string): Record<string, unknown> {
     return this.readJson(this.metaPathFor(id)) ?? {};
   }
 
   /** The decoded canonical config file for a scenario ({} if none). */
-  readConfig(id: number): Record<string, unknown> {
+  readConfig(id: string): Record<string, unknown> {
     return this.readJson(this.configPathFor(id)) ?? {};
   }
 
@@ -170,34 +196,65 @@ export class Runtime {
     return (this.readJson(path) as RunRecord | null) ?? null;
   }
 
+  // ── webhook routing record (single active webhook run) ──────────────────
+
+  /**
+   * Persist the single active webhook route {webhookId, runId}, superseding any prior one. A new
+   * companydata:webhook run calls this on /start; the old run stops receiving (its file stays readable
+   * until TTL/Clear).
+   */
+  writeRoute(webhookId: string, runId: string): void {
+    this.ensureDirs();
+    this.atomicWrite(this.routePath, JSON.stringify({ webhookId, runId }));
+  }
+
+  /** The active webhook route, or null when none is set. */
+  readRoute(): Route | null {
+    const decoded = this.readJson(this.routePath);
+    if (!decoded || typeof decoded.webhookId !== 'string' || typeof decoded.runId !== 'string') return null;
+    return { webhookId: decoded.webhookId, runId: decoded.runId };
+  }
+
+  clearRoute(): void {
+    this.tryUnlink(this.routePath);
+  }
+
   // ── clear ─────────────────────────────────────────────────────────────────
 
   /**
    * Per-scenario clear: delete that scenario's run files AND its config + meta files, then
    * garbage-collect any key PEM no surviving config still references (keys are content-addressed and
-   * may be shared, so a key is removed only once nothing points at it).
+   * may be shared, so a key is removed only once nothing points at it). Clearing the webhook scenario
+   * also drops the routing record; clearing anything wipes the shared pump cache dir (cheap,
+   * single-worker).
    */
-  clearScenario(id: number): void {
+  clearScenario(id: string): void {
     for (const name of this.list(this.runsDir)) {
       if (!name.endsWith('.json')) continue;
       const decoded = this.readJson(join(this.runsDir, name)) as RunRecord | null;
-      if (decoded && Number(decoded.scenario ?? 0) === id) this.tryUnlink(join(this.runsDir, name));
+      if (decoded && String(decoded.scenario ?? '') === id) this.tryUnlink(join(this.runsDir, name));
     }
     this.tryUnlink(this.configPathFor(id));
     this.tryUnlink(this.metaPathFor(id));
+    if (id === 'companydata:webhook') this.clearRoute();
+    rmSync(this.cacheDir, { recursive: true, force: true });
     this.gcConfigKeys();
+    this.ensureDirs();
   }
 
-  /** Global clear: wipe all run files and the entire config tree (configs, metas, keys). */
+  /** Global clear: wipe all run files, the config tree (configs, metas, keys), the route + pump cache. */
   clearAll(): void {
     for (const name of this.list(this.runsDir)) this.tryUnlink(join(this.runsDir, name));
     rmSync(this.configDir, { recursive: true, force: true });
+    rmSync(this.cacheDir, { recursive: true, force: true });
+    this.clearRoute();
     this.ensureDirs();
   }
 
   /**
-   * Delete any key PEM in config/keys that no surviving config/{id}.json references by path. Robust to
-   * content-addressed sharing: a key survives as long as ANY config points at it.
+   * Delete any key PEM in config/keys that no surviving config/{sid}.json references by path. Robust to
+   * content-addressed sharing: a key survives as long as ANY config points at it. Both the OAuth-app key
+   * (identity scenario 3) and the service key (identity 4/8, flow, company-data) are referenced by path.
    */
   private gcConfigKeys(): void {
     const referenced = new Set<string>();

@@ -1,8 +1,8 @@
 {
-  "name": "@allus-fyi/identity-example",
+  "name": "@allus-fyi/examples",
   "version": "1.0.0",
   "private": true,
-  "description": "Runnable identity example (sign-in / OIDC / 2FA) for the allus company-data TypeScript SDK. Its own npm sub-project — NOT part of the published SDK package.",
+  "description": "Runnable example test suite (identity sign-in/OIDC/2FA · contract flow · company-data read/fields/changes/webhooks/documents) for the allus company-data TypeScript SDK. One npm sub-project, ONE server, all three scenario families — NOT part of the published SDK package.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@allus-fyi/company-data": "file:../..",
+    "@allus-fyi/company-data": "file:..",
     "openid-client": "^6.1.7"
   },
   "devDependencies": {

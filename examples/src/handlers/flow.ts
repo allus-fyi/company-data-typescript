@@ -1,40 +1,33 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import type { ServerResponse } from 'node:http';
 
 import { ApiError, Client, ConfigError, FlowRun, ValidationError } from '@allus-fyi/company-data';
 
-import { Runtime, type RunRecord } from './runtime.js';
+import { Runtime, type RunRecord } from '../runtime.js';
+import { sendJson, str } from '../http.js';
 
 /**
- * The demo-backend contract for the ONE contract-flow scenario (flow family — contract v2). One class,
- * one worker (Node's built-in http): HTTP dispatch → handler → the SDK's intended top-level flow surface
- * only (identity / triggerFlowRun / flowRun / processFlowRun / flowRunAnswers / flowRunDocument).
- * Handlers NEVER perform raw platform HTTP.
+ * The FLOW scenario family — the ONE contract-flow scenario "flow:run". Everything the handler does goes
+ * through the SDK's intended top-level flow surface (identity / triggerFlowRun / flowRun / processFlowRun /
+ * flowRunAnswers / flowRunDocument); the scaffolding (routing, config files, run store, static bundle)
+ * lives in src/.
  *
- * Single scenario "flow:run". There is NO cross-card flow-run-id handoff: the platform flow run lives
- * entirely INSIDE this one demo run's file — the demo runId is the backend run and the platform
- * flowRunId is stored inside it, never exposed as a separate browser input.
+ * There is NO cross-card flow-run-id handoff: the platform flow run lives entirely INSIDE this one demo
+ * run's file — the demo runId is the backend run and the platform flowRunId is stored inside it, never
+ * exposed as a separate browser input.
  *
  * Settings flow (config-file model): the browser POSTs the scenario's setup values to
- * POST /api/scenarios/{id}/config, which writes them to a canonical SDK config FILE
- * (.runtime/config/{store}.json; the service PEM → .runtime/config/keys/ by path). /start builds the
- * service {@link Client} from that file via {@link Client.fromConfig} and runs OFF the config — exactly
- * as a real integrator wires the SDK. The request body of /start is ignored; a /start with no saved
- * config → 409 not_configured.
+ * POST /api/scenarios/flow:run/config, which writes them to a canonical SDK config FILE
+ * (.runtime/config/flow_run.json; the service PEM → .runtime/config/keys/ by path). /start builds the
+ * service {@link Client} from that file via {@link Client.fromConfig} and runs OFF the config. The request
+ * body of /start is ignored; a /start with no saved config → 409 not_configured.
  *
  * The GET /api/runs/{runId} poll is the drive loop AND the resume: each poll reads the platform run and,
  * if it is the company's turn, drives exactly ONE company step; otherwise it reports waiting/running and
  * touches nothing (the next poll after the person answers on their phone resumes automatically).
  */
 
-export const CONTRACT_VERSION = 2; // flow family lands at the next-available version (identity=1)
-export const SDK = 'typescript';
-
-/** The single public scenario id (the flow family). */
+/** The single public scenario id (the flow family), used as its config/run key too. */
 const SCENARIO = 'flow:run';
-/** Internal store key for the config/meta/run files (the public id is not filesystem-shaped). */
-const STORE_ID = 1;
 
 const DEFAULT_API_URL = 'https://api.allme.fyi';
 
@@ -45,84 +38,22 @@ const PARTY_CUSTOMER = 'customer';
 /** The canned INVALID value the validation-demo submits once for an email field. */
 const INVALID_EMAIL = 'not-an-email';
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.webp': 'image/webp',
-};
+export class FlowHandler {
+  constructor(private readonly rt: Runtime) {}
 
-export class Server {
-  constructor(
-    private readonly rt: Runtime,
-    private readonly frontendDir: string,
-    private readonly sdkVersion: string,
-    private readonly port: number,
-  ) {}
-
-  // ── entry point ────────────────────────────────────────────────────────
-
-  async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    this.rt.ensureDirs();
-    this.rt.sweep(); // lazy TTL sweep on every request
-
-    const method = req.method ?? 'GET';
-    const host = String(req.headers.host ?? `localhost:${this.port}`);
-    const url = new URL(req.url ?? '/', `http://${host}`);
-    const path = decodeURIComponent(url.pathname);
-
-    try {
-      let m: RegExpMatchArray | null;
-      if (path === '/api/meta' && method === 'GET') {
-        this.meta(res);
-      } else if (path === '/api/clear' && method === 'POST') {
-        this.rt.clearAll();
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/config$/)) && method === 'POST') {
-        await this.config(m[1], req, res);
-      } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/start$/)) && method === 'POST') {
-        await this.start(m[1], res);
-      } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/clear$/)) && method === 'POST') {
-        if (!this.isKnownScenario(m[1])) return this.json(res, { error: 'not_found' }, 404);
-        this.rt.clearScenario(STORE_ID);
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/runs\/([0-9a-f]{32})$/)) && method === 'GET') {
-        await this.run(m[1], res);
-      } else if (path.startsWith('/api/')) {
-        this.json(res, { error: 'not_found' }, 404);
-      } else {
-        this.serveStatic(path, res);
-      }
-    } catch (e) {
-      this.json(res, { error: 'server_error', message: (e as Error).message }, 500);
-    }
+  /** The flow scenarios for GET /api/meta (the single flow:run card). */
+  scenarios(): { id: string; kind: string }[] {
+    return [{ id: SCENARIO, kind: 'runnable' }];
   }
 
-  private isKnownScenario(id: string): boolean {
+  /** True when this family owns the scenario id. */
+  owns(id: string): boolean {
     return id === SCENARIO;
   }
 
-  // ── GET /api/meta ──────────────────────────────────────────────────────
-
-  private meta(res: ServerResponse): void {
-    this.json(res, {
-      sdk: SDK,
-      sdkVersion: this.sdkVersion,
-      contractVersion: CONTRACT_VERSION,
-      scenarios: [{ id: SCENARIO, kind: 'runnable' }],
-    });
+  /** True when a stored run belongs to this family. */
+  ownsRun(run: RunRecord): boolean {
+    return String(run.scenario ?? '') === SCENARIO;
   }
 
   // ── POST /api/scenarios/{id}/config ─────────────────────────────────────
@@ -132,9 +63,8 @@ export class Server {
    * written to config/keys/ and referenced by path; the demo-only run parameters (published flow id,
    * connection id, fixture choice) go to the meta sidecar so the config file stays a pure SDK config.
    */
-  private async config(id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.isKnownScenario(id)) return this.json(res, { error: 'not_found' }, 404);
-    const in_ = await this.body(req);
+  async config(id: string, _host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    if (!this.owns(id)) return sendJson(res, { error: 'not_found' }, 404);
 
     // Canonical SDK config — the service role (client_credentials + service PEM).
     const cfg: Record<string, unknown> = {
@@ -145,16 +75,16 @@ export class Server {
     };
     const pem = str(in_.servicePrivateKeyPem);
     if (pem !== '') cfg.service_private_key = this.rt.materializeConfigKey(pem);
-    const configPath = this.rt.writeConfig(STORE_ID, cfg);
+    const configPath = this.rt.writeConfig(SCENARIO, cfg);
 
     // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
-    this.rt.writeConfigMeta(STORE_ID, {
+    this.rt.writeConfigMeta(SCENARIO, {
       flow_id: str(in_.flowId),
       connection_id: str(in_.connectionId),
       fixture: str(in_.fixture),
     });
 
-    this.json(res, { ok: true, configPath });
+    sendJson(res, { ok: true, configPath });
   }
 
   // ── POST /api/scenarios/{id}/start ──────────────────────────────────────
@@ -165,16 +95,16 @@ export class Server {
    * Connection.personId), call triggerFlowRun, and store the returned platform flowRunId in the demo
    * run file. Returns {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
    */
-  private async start(id: string, res: ServerResponse): Promise<void> {
-    if (!this.isKnownScenario(id)) return this.json(res, { error: 'not_found' }, 404);
+  async start(id: string, _host: string, res: ServerResponse): Promise<void> {
+    if (!this.owns(id)) return sendJson(res, { error: 'not_found' }, 404);
     // The run is built from the persisted config file, not the request body.
-    if (!this.rt.hasConfig(STORE_ID)) return this.json(res, { error: 'not_configured' }, 409);
+    if (!this.rt.hasConfig(SCENARIO)) return sendJson(res, { error: 'not_configured' }, 409);
 
-    const meta = this.rt.readConfigMeta(STORE_ID);
+    const meta = this.rt.readConfigMeta(SCENARIO);
     const flowId = str(meta.flow_id);
     const connectionId = str(meta.connection_id);
     if (flowId === '' || connectionId === '') {
-      return this.json(res, { error: 'not_configured', message: 'flow id and connection id are required' }, 409);
+      return sendJson(res, { error: 'not_configured', message: 'flow id and connection id are required' }, 409);
     }
 
     const calls: string[] = [];
@@ -187,7 +117,7 @@ export class Server {
       calls.push('Client.identity');
       const companyUserId = identity.company_user_id;
       if (companyUserId === '') {
-        return this.json(res, { error: 'identity_error', message: 'identity() returned no company_user_id' }, 502);
+        return sendJson(res, { error: 'identity_error', message: 'identity() returned no company_user_id' }, 502);
       }
 
       // The CUSTOMER party binds to the connected person's public personId.
@@ -195,7 +125,7 @@ export class Server {
       calls.push('Client.connection');
       const personId = connection.personId;
       if (personId === '') {
-        return this.json(
+        return sendJson(
           res,
           { error: 'connection_error', message: `connection ${connectionId} has no personId (not found or not connected)` },
           502,
@@ -208,18 +138,18 @@ export class Server {
 
       flowRunId = flowRun.id;
       if (flowRunId === '') {
-        return this.json(res, { error: 'trigger_error', message: 'triggerFlowRun returned no run id' }, 502);
+        return sendJson(res, { error: 'trigger_error', message: 'triggerFlowRun returned no run id' }, 502);
       }
     } catch (e) {
       if (e instanceof ApiError || e instanceof ConfigError) {
-        return this.json(res, { error: 'start_failed', message: e.message }, 502);
+        return sendJson(res, { error: 'start_failed', message: e.message }, 502);
       }
       throw e;
     }
 
     const runId = this.rt.newRunId();
     this.rt.writeRun(runId, {
-      scenario: STORE_ID,
+      scenario: SCENARIO,
       flowRunId,
       steps: [],
       rejectedNodes: [],
@@ -227,7 +157,7 @@ export class Server {
       completed: false,
     });
 
-    this.json(res, { runId, action: { type: 'none' } });
+    sendJson(res, { runId, action: { type: 'none' } });
   }
 
   // ── GET /api/runs/{runId} ────────────────────────────────────────────────
@@ -238,10 +168,7 @@ export class Server {
    * (document-mode) downloads the generated contract. A terminal run returns its cached result on every
    * poll until TTL/Clear.
    */
-  private async run(runId: string, res: ServerResponse): Promise<void> {
-    let run = this.rt.readRun(runId);
-    if (run === null) return this.json(res, { error: 'not_found' }, 404);
-
+  async runRespond(runId: string, run: RunRecord, _host: string, res: ServerResponse): Promise<void> {
     // Idempotent: once terminal (completed OR errored) the outcome is returned unchanged on every
     // subsequent poll — a failed run must stay failed, not re-drive the platform.
     const terminal = run.completed === true || run.error !== undefined;
@@ -250,7 +177,7 @@ export class Server {
       this.rt.writeRun(runId, run);
     }
 
-    this.json(res, this.result(run));
+    sendJson(res, this.result(run));
   }
 
   /** One poll's worth of work. Returns the (possibly mutated) run record. */
@@ -425,7 +352,7 @@ export class Server {
 
   /** Build the service data client OFF the scenario's config file (service role, Config.fromFile). */
   private serviceClient(): Client {
-    return Client.fromConfig(this.rt.configPathFor(STORE_ID));
+    return Client.fromConfig(this.rt.configPathFor(SCENARIO));
   }
 
   /** Append a call name preserving first-occurrence order (a poll may repeat flowRun across polls). */
@@ -433,48 +360,6 @@ export class Server {
     const out = (calls ?? []).map(String);
     if (!out.includes(name)) out.push(name);
     return out;
-  }
-
-  // ── HTTP plumbing ─────────────────────────────────────────────────────────
-
-  private async body(req: IncomingMessage): Promise<Record<string, unknown>> {
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    if (raw === '') return {};
-    try {
-      const decoded = JSON.parse(raw);
-      return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? decoded : {};
-    } catch {
-      return {};
-    }
-  }
-
-  private json(res: ServerResponse, data: unknown, status = 200): void {
-    const body = JSON.stringify(data);
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(body);
-  }
-
-  private serveStatic(path: string, res: ServerResponse): void {
-    const root = resolve(this.frontendDir);
-    const rel = path === '/' ? '/index.html' : path;
-    const full = resolve(join(root, normalize(rel)));
-
-    // Path-traversal guard + SPA fallback to index.html.
-    if ((full === root || full.startsWith(root + sep)) && existsSync(full) && statSync(full).isFile()) {
-      res.writeHead(200, { 'Content-Type': MIME[extname(full).toLowerCase()] ?? 'application/octet-stream' });
-      createReadStream(full).pipe(res);
-      return;
-    }
-    const index = join(root, 'index.html');
-    if (existsSync(index)) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      createReadStream(index).pipe(res);
-      return;
-    }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('bundle not found');
   }
 }
 
@@ -500,9 +385,4 @@ function cannedValue(ftype: string): string {
     default:
       return 'Acme Corporation';
   }
-}
-
-/** Coerce any config/body value to a string (missing → ''). */
-function str(v: unknown): string {
-  return v === undefined || v === null ? '' : String(v);
 }

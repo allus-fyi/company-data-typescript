@@ -1,6 +1,4 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import type { ServerResponse } from 'node:http';
 
 import {
   ApiError,
@@ -14,26 +12,25 @@ import {
 } from '@allus-fyi/company-data';
 import * as oidc from 'openid-client';
 
-import { generatePkce } from './pkce.js';
-import { Runtime, type RunRecord } from './runtime.js';
-import { TimeoutTransport } from './timeoutTransport.js';
+import { generatePkce } from '../pkce.js';
+import { Runtime, type RunRecord } from '../runtime.js';
+import { TimeoutTransport } from '../timeoutTransport.js';
+import { sendJson, str } from '../http.js';
 
 /**
- * The demo-backend contract (v1). One class, one worker (Node's built-in http): HTTP dispatch →
- * handler → the SDK's intended top-level surface (or the openid-client library for scenarios 5/6).
- * Handlers NEVER perform raw platform HTTP and NEVER block on SDK defaults — detached / challenge waits
- * are short-cycled (timeout=2) inside GET /api/runs.
+ * The IDENTITY scenario family (ids 1–8). Every handler here reaches the SDK's intended top-level surface
+ * — OAuthClient (authorizeUrl / completeSignIn / pollResult), the service data Client (connections /
+ * twoFactor), or the openid-client library for the OIDC scenarios (5/6) — so a reader sees exactly which
+ * call implements each flow. The scaffolding (routing, config files, run store, static bundle) lives in
+ * src/; this file is the identity example.
  *
  * Settings flow (config-file model): the browser POSTs a scenario's setup values to
  * POST /api/scenarios/{id}/config, which writes them to a canonical SDK config FILE
  * (.runtime/config/{id}.json). /start and /enroll then build the SDK from that file via the
  * role-appropriate file constructor (OAuthClient.fromConfig → Config.fromIdwFile; Client.fromConfig →
- * Config.fromFile) and run OFF the config — exactly as a real integrator wires the SDK. The request body
- * of /start is ignored; a /start with no saved config → 409 not_configured.
+ * Config.fromFile) and run OFF the config. The request body of /start is ignored; a /start with no saved
+ * config → 409 not_configured.
  */
-
-export const CONTRACT_VERSION = 1;
-export const SDK = 'typescript';
 
 /** id => kind. Scenario 7 is the guide card (no /start). */
 const SCENARIOS: Record<number, 'runnable' | 'guide'> = {
@@ -58,86 +55,29 @@ const DEFAULT_AUTHORIZE_BASE = DEFAULT_AUTHORIZE_URL; // https://web.allme.fyi/a
 /** Short-cycled poll timeout (ms) for the detached/challenge waits — bounds one worker per poll. */
 const POLL_TIMEOUT_MS = 2000;
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.webp': 'image/webp',
-};
+export class IdentityHandler {
+  constructor(private readonly rt: Runtime) {}
 
-export class Server {
-  constructor(
-    private readonly rt: Runtime,
-    private readonly frontendDir: string,
-    private readonly sdkVersion: string,
-    private readonly port: number,
-  ) {}
-
-  // ── entry point ────────────────────────────────────────────────────────
-
-  async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    this.rt.ensureDirs();
-    this.rt.sweep(); // lazy TTL sweep on every request
-
-    const method = req.method ?? 'GET';
-    const host = String(req.headers.host ?? `localhost:${this.port}`);
-    const url = new URL(req.url ?? '/', `http://${host}`);
-    const path = decodeURIComponent(url.pathname);
-
-    try {
-      let m: RegExpMatchArray | null;
-      if (path === '/api/meta' && method === 'GET') {
-        this.meta(res);
-      } else if (path === '/callback' && method === 'GET') {
-        await this.callback(url, host, res);
-      } else if (path === '/api/clear' && method === 'POST') {
-        this.rt.clearAll();
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/scenarios\/(\d+)\/config$/)) && method === 'POST') {
-        await this.config(Number(m[1]), host, req, res);
-      } else if ((m = path.match(/^\/api\/scenarios\/(\d+)\/start$/)) && method === 'POST') {
-        await this.start(Number(m[1]), host, res);
-      } else if ((m = path.match(/^\/api\/scenarios\/(\d+)\/enroll$/)) && method === 'POST') {
-        await this.enroll(Number(m[1]), req, res);
-      } else if ((m = path.match(/^\/api\/scenarios\/(\d+)\/clear$/)) && method === 'POST') {
-        this.rt.clearScenario(Number(m[1]));
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/runs\/([0-9a-f]{32})$/)) && method === 'GET') {
-        await this.run(m[1], host, res);
-      } else if (path.startsWith('/api/')) {
-        this.json(res, { error: 'not_found' }, 404);
-      } else {
-        this.serveStatic(path, res);
-      }
-    } catch (e) {
-      this.json(res, { error: 'server_error', message: (e as Error).message }, 500);
-    }
+  /** The identity scenarios for GET /api/meta (ids 1–8, with 7 as the guide card). */
+  scenarios(): { id: number; kind: string }[] {
+    return Object.entries(SCENARIOS).map(([id, kind]) => ({ id: Number(id), kind }));
   }
 
-  // ── GET /api/meta ──────────────────────────────────────────────────────
+  /** True when this family owns the scenario id (an integer id). */
+  owns(id: string): boolean {
+    return /^\d+$/.test(id) && SCENARIOS[Number(id)] !== undefined;
+  }
 
-  private meta(res: ServerResponse): void {
-    const scenarios = Object.entries(SCENARIOS).map(([id, kind]) => ({ id: Number(id), kind }));
-    this.json(res, { sdk: SDK, sdkVersion: this.sdkVersion, contractVersion: CONTRACT_VERSION, scenarios });
+  /** True when a stored run belongs to this family. */
+  ownsRun(run: RunRecord): boolean {
+    return /^\d+$/.test(String(run.scenario ?? ''));
   }
 
   // ── POST /api/scenarios/{id}/config ─────────────────────────────────────
 
-  private async config(id: number, host: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (SCENARIOS[id] !== 'runnable') return this.json(res, { error: 'not_found' }, 404);
-    const in_ = await this.body(req);
+  async config(idStr: string, host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const id = Number(idStr);
+    if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
 
     // Canonical SDK config — the idw role for every OAuth scenario (sdk.html §12c).
     const cfg: Record<string, unknown> = {
@@ -166,7 +106,7 @@ export class Server {
       cfg.key_passphrase = str(in_.keyPassphrase);
     }
 
-    const configPath = this.rt.writeConfig(id, cfg);
+    const configPath = this.rt.writeConfig(idStr, cfg);
 
     // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
     const meta: Record<string, unknown> = {};
@@ -178,16 +118,17 @@ export class Server {
       meta.share_code = str(in_.shareCode);
       if (str(in_.context) !== '') meta.context = str(in_.context);
     }
-    this.rt.writeConfigMeta(id, meta);
+    this.rt.writeConfigMeta(idStr, meta);
 
-    this.json(res, { ok: true, configPath });
+    sendJson(res, { ok: true, configPath });
   }
 
   // ── POST /api/scenarios/{id}/start ──────────────────────────────────────
 
-  private async start(id: number, host: string, res: ServerResponse): Promise<void> {
-    if (SCENARIOS[id] !== 'runnable') return this.json(res, { error: 'not_found' }, 404);
-    if (!this.rt.hasConfig(id)) return this.json(res, { error: 'not_configured' }, 409); // built from the file
+  async start(idStr: string, host: string, res: ServerResponse): Promise<void> {
+    const id = Number(idStr);
+    if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
+    if (!this.rt.hasConfig(idStr)) return sendJson(res, { error: 'not_configured' }, 409); // built from the file
 
     const runId = this.rt.newRunId();
     const run: RunRecord = { scenario: id, status: 'pending', state: runId, calls: [] };
@@ -200,13 +141,13 @@ export class Server {
         const pkce = generatePkce();
         run.verifier = pkce.verifier;
         const mode = id === 1 ? 'signin' : id === 3 ? 'one_time' : 'connect';
-        const claims: Claim[] = id === 3 ? this.claimObjects((this.rt.readConfigMeta(id).claims as string[]) ?? []) : [];
-        const oauth = this.oauthClientFor(id);
+        const claims: Claim[] = id === 3 ? this.claimObjects((this.rt.readConfigMeta(idStr).claims as string[]) ?? []) : [];
+        const oauth = this.oauthClientFor(idStr);
         // redirectUri omitted → the OAuthClient uses its config's oauth_redirect_uri.
         const url = oauth.authorizeUrl(mode, { claims, state: runId, responseMode: 'redirect', codeChallenge: pkce.challenge });
         run.calls = ['OAuthClient.authorizeUrl'];
         this.rt.writeRun(runId, run);
-        return this.json(res, { runId, action: { type: 'redirect', url } });
+        return sendJson(res, { runId, action: { type: 'redirect', url } });
       }
 
       case 2: {
@@ -214,24 +155,24 @@ export class Server {
         const pkce = generatePkce();
         run.verifier = pkce.verifier;
         run.wait = 'detached_signin';
-        const oauth = this.oauthClientFor(id);
+        const oauth = this.oauthClientFor(idStr);
         const url = oauth.authorizeUrl('signin', { state: runId, responseMode: 'detached', codeChallenge: pkce.challenge });
         run.calls = ['OAuthClient.authorizeUrl'];
         this.rt.writeRun(runId, run);
-        return this.json(res, { runId, action: { type: 'detached', url } });
+        return sendJson(res, { runId, action: { type: 'detached', url } });
       }
 
       case 5: // OIDC login
       case 6: {
         // OIDC — continue on your phone (#431)
-        const config = await this.oidcConfigFor(id, host);
+        const config = await this.oidcConfigFor(idStr, host);
         const verifier = oidc.randomPKCECodeVerifier();
         const challenge = await oidc.calculatePKCECodeChallenge(verifier);
         const nonce = oidc.randomNonce();
         run.verifier = verifier;
         run.nonce = nonce;
         const url = oidc.buildAuthorizationUrl(config, {
-          redirect_uri: this.configRedirectUri(id, host),
+          redirect_uri: this.configRedirectUri(idStr, host),
           scope: 'openid profile email',
           state: runId,
           nonce,
@@ -240,37 +181,37 @@ export class Server {
         });
         run.calls = ['(oidc) discovery', '(oidc) buildAuthorizationUrl'];
         this.rt.writeRun(runId, run);
-        return this.json(res, { runId, action: { type: 'redirect', url: url.href } });
+        return sendJson(res, { runId, action: { type: 'redirect', url: url.href } });
       }
 
       case 8: {
         // Standalone service-2FA — the challenge step
-        const meta = this.rt.readConfigMeta(id);
+        const meta = this.rt.readConfigMeta(idStr);
         const shareCode = str(meta.share_code);
         const context = str(meta.context) !== '' ? str(meta.context) : null;
         const idempotencyKey = `demo-${runId}`.slice(0, 64); // backend-generated, per-run (SDK requires it)
         run.wait = 'challenge';
-        const client = this.serviceClientFor(id);
+        const client = this.serviceClientFor(idStr);
         const challenge = await client.twoFactor.challenge(shareCode, { context, idempotencyKey });
         run.challengeId = challenge.challengeId;
         run.calls = ['Client.twoFactor', 'TwoFactorClient.challenge'];
         this.rt.writeRun(runId, run);
-        return this.json(res, { runId, action: { type: 'challenge', matchingDigits: challenge.matchingDigits } });
+        return sendJson(res, { runId, action: { type: 'challenge', matchingDigits: challenge.matchingDigits } });
       }
     }
   }
 
   // ── POST /api/scenarios/{id}/enroll (scenario 8) ────────────────────────
 
-  private async enroll(id: number, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (id !== 8) return this.json(res, { error: 'not_found' }, 404);
-    if (!this.rt.hasConfig(id)) return this.json(res, { error: 'not_configured' }, 409);
+  async enroll(idStr: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const id = Number(idStr);
+    if (id !== 8) return sendJson(res, { error: 'not_found' }, 404);
+    if (!this.rt.hasConfig(idStr)) return sendJson(res, { error: 'not_configured' }, 409);
 
-    const in_ = await this.body(req);
     const responseMode = in_.responseMode === 'detached' ? 'detached' : 'redirect';
     const runId = this.rt.newRunId();
 
-    const oauth = this.oauthClientFor(id);
+    const oauth = this.oauthClientFor(idStr);
     const url = oauth.authorizeUrl('2fa_enroll', { state: runId, responseMode });
 
     const run: RunRecord = {
@@ -284,12 +225,12 @@ export class Server {
     this.rt.writeRun(runId, run);
 
     const action = responseMode === 'detached' ? { type: 'detached', url } : { type: 'redirect', url };
-    this.json(res, { runId, action });
+    sendJson(res, { runId, action });
   }
 
   // ── GET /callback ───────────────────────────────────────────────────────
 
-  private async callback(url: URL, host: string, res: ServerResponse): Promise<void> {
+  async callback(url: URL, host: string, res: ServerResponse): Promise<void> {
     const state = url.searchParams.get('state') ?? '';
     const run = this.rt.readRun(state);
     if (run === null) {
@@ -328,10 +269,7 @@ export class Server {
 
   // ── GET /api/runs/{runId} ────────────────────────────────────────────────
 
-  private async run(runId: string, host: string, res: ServerResponse): Promise<void> {
-    let run = this.rt.readRun(runId);
-    if (run === null) return this.json(res, { error: 'not_found' }, 404);
-
+  async runRespond(runId: string, run: RunRecord, host: string, res: ServerResponse): Promise<void> {
     // Idempotent: a terminal outcome is returned on every poll until TTL/Clear.
     if ((run.status ?? 'pending') === 'pending') {
       run = await this.advance(run, host);
@@ -341,7 +279,7 @@ export class Server {
     const out: Record<string, unknown> = { status: run.status ?? 'pending', calls: run.calls ?? [] };
     if (run.result !== undefined) out.result = run.result;
     if (run.error !== undefined) out.error = run.error;
-    this.json(res, out);
+    sendJson(res, out);
   }
 
   /**
@@ -352,16 +290,17 @@ export class Server {
   private async advance(run: RunRecord, host: string): Promise<RunRecord> {
     const wait = run.wait as string | undefined;
     const id = Number(run.scenario ?? 0);
+    const idStr = String(id);
     const calls = run.calls as string[];
     try {
       if (wait === 'detached_signin') {
-        const oauth = this.oauthClientFor(id, POLL_TIMEOUT_MS);
+        const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
         const body = await oauth.pollResult(String(run.state), { timeout: 2, interval: 2 });
         calls.push('OAuthClient.pollResult');
         const code = str(body.code);
         if (code !== '') await this.completeSignin(run, code, id);
       } else if (wait === 'detached_enroll') {
-        const oauth = this.oauthClientFor(id, POLL_TIMEOUT_MS);
+        const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
         const body = await oauth.pollResult(String(run.state), { timeout: 2, interval: 2 });
         calls.push('OAuthClient.pollResult');
         if (body.enrolled) {
@@ -369,7 +308,7 @@ export class Server {
           run.result = { enrolled: true };
         }
       } else if (wait === 'challenge') {
-        const client = this.serviceClientFor(id, POLL_TIMEOUT_MS);
+        const client = this.serviceClientFor(idStr, POLL_TIMEOUT_MS);
         const r = await client.twoFactor.waitForResult(String(run.challengeId), { timeout: 2, interval: 2 });
         calls.push('TwoFactorClient.waitForResult');
         run.status = 'done';
@@ -396,7 +335,8 @@ export class Server {
    * completeSignIn, and for connect read the person's LIVE values via the service data client.
    */
   private async completeSignin(run: RunRecord, code: string, id: number): Promise<void> {
-    const oauth = this.oauthClientFor(id);
+    const idStr = String(id);
+    const oauth = this.oauthClientFor(idStr);
     const out = await oauth.completeSignIn(code, run.verifier ? String(run.verifier) : undefined);
     (run.calls as string[]).push('OAuthClient.completeSignIn');
     const result: Record<string, unknown> = {
@@ -409,7 +349,7 @@ export class Server {
     if (id === 4) {
       // Connect: read the person's LIVE values via the service data client.
       const shareCode = str(out.user?.share_code);
-      const client = this.serviceClientFor(id);
+      const client = this.serviceClientFor(idStr);
       let live: Record<string, unknown> = {};
       for await (const conn of client.connections()) {
         if (shareCode !== '' && conn.shareCode === shareCode) {
@@ -427,8 +367,8 @@ export class Server {
 
   /** Complete an OIDC sign-in (scenarios 5/6) via the openid-client library — id_token verified. */
   private async completeOidc(run: RunRecord, currentUrl: URL, host: string): Promise<void> {
-    const id = Number(run.scenario ?? 0);
-    const config = await this.oidcConfigFor(id, host);
+    const idStr = String(Number(run.scenario ?? 0));
+    const config = await this.oidcConfigFor(idStr, host);
     const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
       pkceCodeVerifier: String(run.verifier ?? ''),
       expectedNonce: String(run.nonce ?? ''),
@@ -448,9 +388,9 @@ export class Server {
    * alternate base the wrapper cannot set. `pollTimeoutMs` bounds the HTTP network wait for the
    * short-cycled polls so one blackholed request cannot pin the single worker.
    */
-  private oauthClientFor(id: number, pollTimeoutMs?: number): OAuthClient {
-    const path = this.rt.configPathFor(id);
-    const base = str(this.rt.readConfigMeta(id).authorize_base);
+  private oauthClientFor(idStr: string, pollTimeoutMs?: number): OAuthClient {
+    const path = this.rt.configPathFor(idStr);
+    const base = str(this.rt.readConfigMeta(idStr).authorize_base);
     const opts: OAuthClientOptions = {};
     if (pollTimeoutMs !== undefined) opts.transport = new TimeoutTransport(pollTimeoutMs);
     if (base === '' || base === DEFAULT_AUTHORIZE_URL) {
@@ -461,8 +401,8 @@ export class Server {
   }
 
   /** Build the service data client OFF the scenario's config file (service role). */
-  private serviceClientFor(id: number, pollTimeoutMs?: number): Client {
-    const path = this.rt.configPathFor(id);
+  private serviceClientFor(idStr: string, pollTimeoutMs?: number): Client {
+    const path = this.rt.configPathFor(idStr);
     if (pollTimeoutMs === undefined) return Client.fromConfig(path);
     return Client.fromConfig(path, { httpOptions: { transport: new TimeoutTransport(pollTimeoutMs) } });
   }
@@ -472,23 +412,23 @@ export class Server {
    * Discovery is driven off the configured api base (issuer override); http bases enable insecure requests
    * for the local stack. Auth uses client_secret_post — the token endpoint's method.
    */
-  private async oidcConfigFor(id: number, host: string): Promise<oidc.Configuration> {
-    const cfg = this.rt.readConfig(id);
+  private async oidcConfigFor(idStr: string, host: string): Promise<oidc.Configuration> {
+    const cfg = this.rt.readConfig(idStr);
     const server = new URL(str(cfg.api_url) || DEFAULT_API_URL);
     const options: oidc.DiscoveryRequestOptions = {};
     if (server.protocol === 'http:') options.execute = [oidc.allowInsecureRequests];
     return oidc.discovery(
       server,
       str(cfg.oauth_client_id),
-      { redirect_uris: [this.configRedirectUri(id, host)], response_types: ['code'] },
+      { redirect_uris: [this.configRedirectUri(idStr, host)], response_types: ['code'] },
       oidc.ClientSecretPost(str(cfg.oauth_client_secret)),
       options,
     );
   }
 
   /** The redirect URI recorded in the scenario's config file (used by the OIDC library). */
-  private configRedirectUri(id: number, host: string): string {
-    return str(this.rt.readConfig(id).oauth_redirect_uri) || this.redirectUri(host);
+  private configRedirectUri(idStr: string, host: string): string {
+    return str(this.rt.readConfig(idStr).oauth_redirect_uri) || this.redirectUri(host);
   }
 
   // ── input / config plumbing ──────────────────────────────────────────────
@@ -514,51 +454,4 @@ export class Server {
     for (const [slug, v] of Object.entries(conn.values)) out[slug] = v.value;
     return out;
   }
-
-  // ── HTTP plumbing ─────────────────────────────────────────────────────────
-
-  private async body(req: IncomingMessage): Promise<Record<string, unknown>> {
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    if (raw === '') return {};
-    try {
-      const decoded = JSON.parse(raw);
-      return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? decoded : {};
-    } catch {
-      return {};
-    }
-  }
-
-  private json(res: ServerResponse, data: unknown, status = 200): void {
-    const body = JSON.stringify(data);
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(body);
-  }
-
-  private serveStatic(path: string, res: ServerResponse): void {
-    const root = resolve(this.frontendDir);
-    const rel = path === '/' ? '/index.html' : path;
-    const full = resolve(join(root, normalize(rel)));
-
-    // Path-traversal guard + SPA fallback to index.html.
-    if ((full === root || full.startsWith(root + sep)) && existsSync(full) && statSync(full).isFile()) {
-      res.writeHead(200, { 'Content-Type': MIME[extname(full).toLowerCase()] ?? 'application/octet-stream' });
-      createReadStream(full).pipe(res);
-      return;
-    }
-    const index = join(root, 'index.html');
-    if (existsSync(index)) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      createReadStream(index).pipe(res);
-      return;
-    }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('bundle not found');
-  }
-}
-
-/** Coerce any config/body value to a trimmed-ish string (missing → ''). */
-function str(v: unknown): string {
-  return v === undefined || v === null ? '' : String(v);
 }

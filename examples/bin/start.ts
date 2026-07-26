@@ -11,7 +11,8 @@ import { Runtime } from '../src/runtime.js';
 import { Server, CONTRACT_VERSION } from '../src/server.js';
 
 /**
- * One-command launcher for the flow example (`npm start`).
+ * One-command launcher for the whole example test suite (`npm start`) — ONE server that serves all three
+ * scenario families (identity / flow / company-data) on ONE port.
  *
  * Steps:
  *   1. wipe .runtime/ (fresh state each boot)
@@ -19,15 +20,15 @@ import { Server, CONTRACT_VERSION } from '../src/server.js';
  *      unpack to .frontend/<tag>/  (a present, verified bundle is a cache hit — nothing is re-fetched)
  *   3. assert the bundle's contract.json version == the backend's implemented CONTRACT_VERSION
  *   4. refuse a busy port with a clear message
- *   5. serve bundle + API on ONE port — SINGLE process = single worker
+ *   5. serve bundle + API + /callback + public /webhook on ONE port — SINGLE process = single worker
  */
 
 const RELEASE_BASE = 'https://github.com/allme-sdk/example-test-suite/releases/download';
-const base = dirname(dirname(fileURLToPath(import.meta.url))); // examples/flow
+const base = dirname(dirname(fileURLToPath(import.meta.url))); // examples/
 process.chdir(base);
 
 async function main(): Promise<void> {
-  log('flow example — starting up');
+  log('example test suite — starting up');
 
   // 1. fresh runtime state
   const rt = new Runtime(base);

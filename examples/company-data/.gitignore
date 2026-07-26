@@ -1,7 +1,0 @@
-# Transients — never committed (installed deps + runtime state + fetched bundle).
-# package-lock.json IS committed: `npm install` then pins the toolchain (tsx/typescript) exactly.
-/node_modules/
-/.runtime/
-/.frontend/
-/.frontend.download.tar.gz
-.DS_Store

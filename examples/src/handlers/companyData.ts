@@ -1,17 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { BinaryHandle, Client, WebhookError, type Change, type Headers } from '@allus-fyi/company-data';
 
-import { Runtime, type RunRecord } from './runtime.js';
-import { TimeoutTransport } from './timeoutTransport.js';
+import { Runtime, type RunRecord } from '../runtime.js';
+import { TimeoutTransport } from '../timeoutTransport.js';
+import { headerValue, readRawBody, sendJson, sendText, str } from '../http.js';
 
 /**
- * The company-data demo backend (contract v3, company-data family). One class, one worker (Node's
- * built-in http): HTTP dispatch → handler → the SDK's intended top-level surface ONLY (no raw platform
- * HTTP, no SDK internals). Every company-data scenario runs the SERVICE-role data {@link Client}, built
- * from the persisted config file — there is NO OAuth/OIDC leg (no /callback, no /enroll).
+ * The COMPANY-DATA scenario family (contract v3). Every scenario runs the SERVICE-role data {@link Client}
+ * built from the persisted config file — there is NO OAuth/OIDC leg (no /callback, no /enroll). Each
+ * handler reaches the SDK's intended top-level surface only; the scaffolding lives in src/.
  *
  *   read        — Client.connections()          → connection-grouped decrypted values
  *   definitions — Client.requestFields()         → your request-field catalog
@@ -23,12 +21,8 @@ import { TimeoutTransport } from './timeoutTransport.js';
  * Settings flow (config-file model): the browser POSTs a scenario's setup values to
  * POST /api/scenarios/{id}/config, which writes them to a canonical SDK config FILE
  * (.runtime/config/{sid}.json). /start builds the Client from that file (Client.fromConfig →
- * Config.fromFile) and runs OFF it — exactly as a real integrator wires the SDK. A /start with no saved
- * config → 409 not_configured.
+ * Config.fromFile) and runs OFF it. A /start with no saved config → 409 not_configured.
  */
-
-export const CONTRACT_VERSION = 3;
-export const SDK = 'typescript';
 
 const READ = 'companydata:read';
 const DEFINITIONS = 'companydata:definitions';
@@ -53,79 +47,22 @@ const DEFAULT_API_URL = 'https://api.allme.fyi';
 /** Short HTTP timeout (ms) for the per-poll drainBatch() feed fetch — bounds one worker per poll. */
 const FEED_TIMEOUT_MS = 2000;
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.webp': 'image/webp',
-};
+export class CompanyDataHandler {
+  constructor(private readonly rt: Runtime) {}
 
-export class Server {
-  constructor(
-    private readonly rt: Runtime,
-    private readonly frontendDir: string,
-    private readonly sdkVersion: string,
-    private readonly port: number,
-  ) {}
-
-  // ── entry point ────────────────────────────────────────────────────────
-
-  async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    this.rt.ensureDirs();
-    this.rt.sweep(); // lazy TTL sweep on every request
-
-    const method = req.method ?? 'GET';
-    const host = String(req.headers.host ?? `localhost:${this.port}`);
-    const url = new URL(req.url ?? '/', `http://${host}`);
-    const path = decodeURIComponent(url.pathname);
-
-    try {
-      let m: RegExpMatchArray | null;
-      if (path === '/api/meta' && method === 'GET') {
-        this.meta(res);
-      } else if (path === '/webhook' && method === 'POST') {
-        await this.webhook(req, res); // PUBLIC inbound delivery (not under /api/)
-      } else if (path === '/api/clear' && method === 'POST') {
-        this.rt.clearAll();
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/scenarios\/([a-z:]+)\/config$/)) && method === 'POST') {
-        await this.config(m[1], req, res);
-      } else if ((m = path.match(/^\/api\/scenarios\/([a-z:]+)\/start$/)) && method === 'POST') {
-        await this.start(m[1], res);
-      } else if ((m = path.match(/^\/api\/scenarios\/([a-z:]+)\/clear$/)) && method === 'POST') {
-        this.rt.clearScenario(m[1]);
-        this.json(res, { ok: true });
-      } else if ((m = path.match(/^\/api\/runs\/([0-9a-f]{32})$/)) && method === 'GET') {
-        await this.run(m[1], res);
-      } else if (path.startsWith('/api/')) {
-        this.json(res, { error: 'not_found' }, 404);
-      } else {
-        this.serveStatic(path, res);
-      }
-    } catch (e) {
-      // A start-time / handler failure surfaces as a NON-2xx the shared client raises — never a 200
-      // without the success envelope.
-      this.json(res, { error: 'server_error', message: (e as Error).message }, 500);
-    }
+  /** The company-data scenarios for GET /api/meta (the five service-role cards). */
+  scenarios(): { id: string; kind: string }[] {
+    return Object.entries(SCENARIOS).map(([id, kind]) => ({ id, kind }));
   }
 
-  // ── GET /api/meta ──────────────────────────────────────────────────────
+  /** True when this family owns the scenario id. */
+  owns(id: string): boolean {
+    return SCENARIOS[id] !== undefined;
+  }
 
-  private meta(res: ServerResponse): void {
-    const scenarios = Object.entries(SCENARIOS).map(([id, kind]) => ({ id, kind }));
-    this.json(res, { sdk: SDK, sdkVersion: this.sdkVersion, contractVersion: CONTRACT_VERSION, scenarios });
+  /** True when a stored run belongs to this family. */
+  ownsRun(run: RunRecord): boolean {
+    return String(run.scenario ?? '').startsWith('companydata:');
   }
 
   // ── POST /api/scenarios/{id}/config ─────────────────────────────────────
@@ -137,9 +74,8 @@ export class Server {
    * X-Allus-Webhook-Id header) and records the webhook id in a meta sidecar (the routing key /start
    * needs). The documents scenario records the target share code in the sidecar.
    */
-  private async config(id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (SCENARIOS[id] !== 'runnable') return this.json(res, { error: 'not_found' }, 404);
-    const in_ = await this.body(req);
+  async config(id: string, _host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
 
     // Canonical SDK config — the service role for every company-data scenario (sdk.html §2).
     const cfg: Record<string, unknown> = {
@@ -168,14 +104,14 @@ export class Server {
     const configPath = this.rt.writeConfig(id, cfg);
     this.rt.writeConfigMeta(id, meta);
 
-    this.json(res, { ok: true, configPath });
+    sendJson(res, { ok: true, configPath });
   }
 
   // ── POST /api/scenarios/{id}/start ──────────────────────────────────────
 
-  private async start(id: string, res: ServerResponse): Promise<void> {
-    if (SCENARIOS[id] !== 'runnable') return this.json(res, { error: 'not_found' }, 404);
-    if (!this.rt.hasConfig(id)) return this.json(res, { error: 'not_configured' }, 409); // built from the file
+  async start(id: string, _host: string, res: ServerResponse): Promise<void> {
+    if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
+    if (!this.rt.hasConfig(id)) return sendJson(res, { error: 'not_configured' }, 409); // built from the file
 
     if (id === WEBHOOK) return this.startWebhook(res);
 
@@ -199,13 +135,13 @@ export class Server {
           result = await this.doDocuments(client, calls);
           break;
         default:
-          return this.json(res, { error: 'not_found' }, 404);
+          return sendJson(res, { error: 'not_found' }, 404);
       }
       this.rt.writeRun(runId, { scenario: id, status: 'done', result, calls });
     } catch (e) {
       this.rt.writeRun(runId, { scenario: id, status: 'failed', error: (e as Error).message, calls });
     }
-    this.json(res, { runId, action: { type: 'data' } });
+    sendJson(res, { runId, action: { type: 'data' } });
   }
 
   /**
@@ -370,7 +306,7 @@ export class Server {
    */
   private startWebhook(res: ServerResponse): void {
     const webhookId = str(this.rt.readConfigMeta(WEBHOOK).webhook_id);
-    if (webhookId === '') return this.json(res, { error: 'not_configured' }, 409);
+    if (webhookId === '') return sendJson(res, { error: 'not_configured' }, 409);
     const runId = this.rt.newRunId();
     this.rt.writeRun(runId, {
       scenario: WEBHOOK,
@@ -382,7 +318,7 @@ export class Server {
       calls: ['(webhook run started — POST /webhook receives; each poll also drainBatch()s the feed)'],
     });
     this.rt.writeRoute(webhookId, runId);
-    this.json(res, { runId, action: { type: 'none' } });
+    sendJson(res, { runId, action: { type: 'none' } });
   }
 
   /**
@@ -394,24 +330,24 @@ export class Server {
    *       VERIFIED-but-unparseable delivery → 200 acknowledge-and-note (increment unparseable) — NOT 401.
    * All accepted-and-dropped cases return 200 because the platform worker counts EXACTLY 200 as success.
    */
-  private async webhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const rawBody = await this.rawBody(req);
+  async webhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const rawBody = await readRawBody(req);
     const headers = req.headers as Headers;
     const webhookId = headerValue(req.headers['x-allus-webhook-id']);
 
     const route = this.rt.readRoute();
     if (route === null || webhookId === null || webhookId !== route.webhookId) {
-      return this.text(res, 'discarded: unknown or stale webhook id', 200);
+      return sendText(res, 'discarded: unknown or stale webhook id', 200);
     }
     const run = this.rt.readRun(route.runId);
-    if (run === null) return this.text(res, 'discarded: no active webhook run', 200);
+    if (run === null) return sendText(res, 'discarded: no active webhook run', 200);
 
     const client = Client.fromConfig(this.rt.configPathFor(WEBHOOK));
     this.recordCall(run, 'Client.verifyWebhook');
     if (!client.verifyWebhook(rawBody, headers)) {
       // A genuine signature failure — persist the attempted verify so the calls trace stays truthful.
       this.rt.writeRun(route.runId, run);
-      return this.text(res, 'signature verification failed', 401);
+      return sendText(res, 'signature verification failed', 401);
     }
     try {
       this.recordCall(run, 'Client.parseWebhook');
@@ -430,21 +366,18 @@ export class Server {
       });
     }
     this.rt.writeRun(route.runId, run);
-    this.text(res, 'ok', 200);
+    sendText(res, 'ok', 200);
   }
 
   // ── GET /api/runs/{runId} ────────────────────────────────────────────────
 
-  private async run(runId: string, res: ServerResponse): Promise<void> {
-    let run = this.rt.readRun(runId);
-    if (run === null) return this.json(res, { error: 'not_found' }, 404);
-
+  async runRespond(runId: string, run: RunRecord, _host: string, res: ServerResponse): Promise<void> {
     // The accumulating webhook run: each poll also does ONE immediate drainBatch() raw feed fetch (NOT
     // processChanges(), which loops the pump to empty and could stall the single worker) so events
     // generated AFTER start still appear in deployed-no-tunnel mode.
     if (String(run.scenario ?? '') === WEBHOOK) {
       run = await this.webhookFeedFallback(runId, run);
-      return this.json(res, {
+      return sendJson(res, {
         status: run.status ?? 'pending',
         calls: run.calls ?? [],
         result: {
@@ -458,7 +391,7 @@ export class Server {
     const out: Record<string, unknown> = { status: run.status ?? 'pending', calls: run.calls ?? [] };
     if (run.result !== undefined) out.result = run.result;
     if (run.error !== undefined) out.error = run.error;
-    this.json(res, out);
+    sendJson(res, out);
   }
 
   /**
@@ -556,71 +489,9 @@ export class Server {
     };
     return source !== null ? { source, ...event } : event;
   }
-
-  // ── input / HTTP plumbing ────────────────────────────────────────────────
-
-  /** The raw request body bytes (webhook verify/parse need the exact bytes the HMAC was computed over). */
-  private async rawBody(req: IncomingMessage): Promise<Buffer> {
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    return Buffer.concat(chunks);
-  }
-
-  private async body(req: IncomingMessage): Promise<Record<string, unknown>> {
-    const raw = (await this.rawBody(req)).toString('utf8');
-    if (raw === '') return {};
-    try {
-      const decoded = JSON.parse(raw);
-      return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? decoded : {};
-    } catch {
-      return {};
-    }
-  }
-
-  private json(res: ServerResponse, data: unknown, status = 200): void {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data));
-  }
-
-  private text(res: ServerResponse, body: string, status = 200): void {
-    res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(body);
-  }
-
-  private serveStatic(path: string, res: ServerResponse): void {
-    const root = resolve(this.frontendDir);
-    const rel = path === '/' ? '/index.html' : path;
-    const full = resolve(join(root, normalize(rel)));
-
-    // Path-traversal guard + SPA fallback to index.html.
-    if ((full === root || full.startsWith(root + sep)) && existsSync(full) && statSync(full).isFile()) {
-      res.writeHead(200, { 'Content-Type': MIME[extname(full).toLowerCase()] ?? 'application/octet-stream' });
-      createReadStream(full).pipe(res);
-      return;
-    }
-    const index = join(root, 'index.html');
-    if (existsSync(index)) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      createReadStream(index).pipe(res);
-      return;
-    }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('bundle not found');
-  }
 }
 
 // ── module helpers ──────────────────────────────────────────────────────────
-
-/** Coerce any config/body value to a string (missing → ''). */
-function str(v: unknown): string {
-  return v === undefined || v === null ? '' : String(v);
-}
-
-/** First value of a possibly-array header, or null. */
-function headerValue(v: string | string[] | undefined): string | null {
-  if (v === undefined) return null;
-  return Array.isArray(v) ? (v[0] ?? null) : v;
-}
 
 /**
  * Render a decrypted value for JSON. A binary value is a lazy {@link BinaryHandle} — render a short
