@@ -2,7 +2,7 @@
 
 A thin, runnable localhost backend that serves the shared allme SDK example frontend and implements the
 **demo-backend contract v3, company-data family** through the TypeScript SDK's **service-role** data
-`Client`. Five scenarios, one command, disposable state.
+`Client`. Five scenarios, disposable state.
 
 This is its own npm sub-project — it is **not** part of the published `@allus-fyi/company-data` package.
 It depends on the SDK via a local path (`file:../..`).
@@ -10,6 +10,8 @@ It depends on the SDK via a local path (`file:../..`).
 ## Run
 
 ```bash
+git clone https://github.com/allus-fyi/company-data-typescript
+cd company-data-typescript/examples/company-data
 npm install       # once — installs tsx/typescript + links the local SDK
 npm start         # wipes .runtime/, fetches + verifies the pinned frontend, serves on :8091
 ```
@@ -54,7 +56,11 @@ and returns `{action:{type:"none"}}`. Events arrive two ways:
    feed fetch, appending `{source:"feed",…}` events deduped on `Change.id`. The run stays `pending` while
    collecting; the frontend keeps polling and renders `run.result`.
 
-The webhook tunnel is the optional advanced (deployed) path; the feed fallback works locally without it.
+The scenario is **setup-first**: register a webhook on your service in the portal, then paste its
+**webhook id** and one-time **HMAC secret** into the scenario before starting it — **the run refuses to
+start without them** (`/start` answers `409 not_configured`). Set `encrypt_payload` OFF; this example
+holds no account private key. Once it is started, the webhook tunnel is the optional advanced (deployed)
+path; the feed fallback works locally without it.
 
 ## Backend state (single worker, disposable)
 
@@ -77,7 +83,7 @@ the demo clearer (sdk.html §2).
 ## Files
 
 ```
-bin/start.ts            one-command launcher (wipe → fetch+verify bundle → contract guard → serve)
+bin/start.ts            launcher (wipe → fetch+verify bundle → contract guard → serve)
 src/server.ts           HTTP dispatch → one handler per scenario → the SDK call
 src/runtime.ts          .runtime/ state: config files, runs, webhook route, pump cache
 src/timeoutTransport.ts a short-timeout HttpTransport for the per-poll drainBatch() feed fetch

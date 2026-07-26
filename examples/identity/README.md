@@ -1,6 +1,6 @@
 # Identity example — allus company-data TypeScript SDK
 
-A runnable, one-command demo of every **identity** scenario the SDK supports —
+A runnable demo of every **identity** scenario the SDK supports —
 "Sign in with allme" (redirect + detached), one-time claims, stay-connected,
 standard **OIDC** login (the #314 compliance surface, via the `openid-client`
 library), OIDC-continue-on-phone, and standalone **service-2FA** with enrollment.
@@ -17,6 +17,8 @@ intended top-level surface, so a reader sees exactly which SDK call implements e
 ## Run it
 
 ```bash
+git clone https://github.com/allus-fyi/company-data-typescript
+cd company-data-typescript/examples/identity
 npm install     # installs the OIDC library + links the SDK from ../.. (file: dependency)
 npm start       # fetches + verifies the pinned frontend, then serves on http://localhost:8091
 ```
@@ -70,7 +72,7 @@ examples/identity/
 ├── package.json          # own manifest (openid-client + the SDK via file:../..); npm start
 ├── tsconfig.json         # own strict tsconfig (tsc --noEmit typechecks the example)
 ├── frontend.lock         # pinned {tag, sha256} of the shared frontend bundle
-├── bin/start.ts          # one-command launcher (wipe → fetch+verify bundle → contract guard → serve)
+├── bin/start.ts          # launcher (wipe → fetch+verify bundle → contract guard → serve)
 └── src/
     ├── server.ts         # the contract v1 dispatch + handlers (calls the SDK surface)
     ├── runtime.ts        # .runtime/ file state (config files, runs, key PEMs, TTL sweep, clear)

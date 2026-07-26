@@ -76,7 +76,7 @@ The package ships **dual ESM + CommonJS** with bundled `.d.ts` types.
 
 ```bash
 npm install @allus-fyi/company-data
-# or, working from this repo:  npm install && npm run build   # from sdks/typescript/
+# or, working from this repo:  npm install && npm run build   # from the repo root
 ```
 
 ```ts
