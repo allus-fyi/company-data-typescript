@@ -17,7 +17,7 @@ shared frontend bundle fetched from
 teaching: each scenario's handler calls the SDK's intended top-level surface, so a reader opens a
 family's handler file and sees exactly which SDK call implements each flow.
 
-> This is its **own npm sub-project**, excluded from the published SDK package. It is a local developer
+> This is its **own npm sub-project** — not separately published, though its source ships inside the SDK's npm package (#493). It is a local developer
 > demo, not a production service.
 
 ## Prerequisites

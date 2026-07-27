@@ -2,7 +2,7 @@
   "name": "@allus-fyi/examples",
   "version": "1.0.0",
   "private": true,
-  "description": "Runnable example test suite (identity sign-in/OIDC/2FA · contract flow · company-data read/fields/changes/webhooks/documents) for the allus company-data TypeScript SDK. One npm sub-project, ONE server, all three scenario families — NOT part of the published SDK package.",
+  "description": "Runnable example test suite (identity sign-in/OIDC/2FA · contract flow · company-data read/fields/changes/webhooks/documents) for the allus company-data TypeScript SDK. One npm sub-project, ONE server, all three scenario families — not separately published, but its source ships inside the SDK package (#493).",
   "license": "MIT",
   "type": "module",
   "engines": {
