@@ -1,6 +1,6 @@
 # Example test suite — allus company-data TypeScript SDK
 
-A runnable, one-command demo of **everything the SDK does**, across three scenario families:
+A runnable demo of **everything the SDK does**, across three scenario families:
 
 - **Identity** — "Sign in with allme" (redirect + detached), one-time claims, stay-connected,
   standard **OIDC** login (via the `openid-client` library), OIDC-continue-on-phone, 2FA-at-consent
@@ -25,10 +25,22 @@ family's handler file and sees exactly which SDK call implements each flow.
 - **Node.js 18+** and **npm** on your PATH.
 - **`tar`** on your PATH (used once to unpack the fetched frontend bundle).
 - The **SDK built to `dist/`.** The example consumes the SDK through its published `exports` map, so
-  the SDK must be built first (the normal state of an installed package). From the SDK repo root:
-  `npm install && npm run build`.
+  the SDK must be built first. An installed package already is — from a clone, run
+  `npm install && npm run build` in the SDK repo root.
 
 ## Get it and run it
+
+The shortest path is the package manager: this suite ships **inside** the published
+`@allus-fyi/company-data` package, so installing the SDK also gets you the example.
+
+```bash
+npm install @allus-fyi/company-data
+cd node_modules/@allus-fyi/company-data/examples
+npm install                           # installs tsx + the OIDC library, links the SDK from ..
+npm start                             # -> serves http://localhost:8091
+```
+
+Or from a clone of the SDK repository:
 
 ```bash
 git clone https://github.com/allus-fyi/company-data-typescript
@@ -157,7 +169,7 @@ examples/
 ├── tsconfig.json         # one strict tsconfig (tsc --noEmit typechecks the whole example)
 ├── frontend.lock         # ONE pinned {tag, sha256} of the shared frontend bundle (contract v3)
 ├── fixtures/             # the two importable flow packages (portal-export zips)
-├── bin/start.ts          # one-command launcher (wipe → fetch+verify bundle → contract guard → serve)
+├── bin/start.ts          # launcher (wipe → fetch+verify bundle → contract guard → serve)
 └── src/
     ├── server.ts         # the router: /api/meta, config/start/enroll/clear/runs, /callback, /webhook, static
     ├── runtime.ts        # .runtime/ file state (config files, runs, key PEMs, webhook route, pump cache, TTL)
