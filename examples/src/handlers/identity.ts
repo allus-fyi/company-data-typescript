@@ -444,8 +444,11 @@ export class IdentityHandler {
     return ['email', 'phone']; // a small default claim set (spec §4 scenario 3)
   }
 
+  // #498: a claim carries a mandatory, unique `name` — the key `values` and `attestations` come back
+  // under. The demo's config lists claim TYPES, so the type doubles as the name here; a real
+  // integration usually names them for its own domain ("billing_email").
   private claimObjects(types: string[]): Claim[] {
-    return types.map((t) => ({ type: t }));
+    return types.map((t) => ({ name: t, type: t }));
   }
 
   /** Map a Connection's typed values to a plain {slug: value} object for the result payload. */

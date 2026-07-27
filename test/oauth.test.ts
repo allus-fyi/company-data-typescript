@@ -114,22 +114,44 @@ test('authorizeUrl pkce + detached', () => {
 
 test('authorizeUrl claim validation drops binary/empty', () => {
   const c = new OAuthClient(idwCfg());
+  // #498: every claim carries a mandatory `name` — the identity everything downstream is keyed by.
   const claims: Claim[] = [
-    { type: 'email', suggest: 'email_personal' },
-    { type: 'photo' },
-    { type: 'phone', required: true },
-    { type: '' },
+    { name: 'email', type: 'email', suggest: 'email_personal' },
+    { name: 'avatar', type: 'photo' },
+    { name: 'phone', type: 'phone', required: true },
+    { name: 'nothing', type: '' },
   ];
   const { q } = parseUrl(c.authorizeUrl('one_time', { claims }));
   const parsed = JSON.parse(q.get('claims')!);
   assert.deepEqual(parsed.map((x: { type: string }) => x.type), ['email', 'phone']);
+  assert.deepEqual(parsed.map((x: { name: string }) => x.name), ['email', 'phone']);
   assert.equal(parsed[0].suggest, 'email_personal');
   assert.equal(parsed[1].required, true);
 });
 
+// #498 §2: a nameless claim, and two sharing a name, are refused at the call that made them.
+test('authorizeUrl requires a claim name and rejects duplicates', () => {
+  const c = new OAuthClient(idwCfg());
+  assert.throws(() => c.authorizeUrl('one_time', { claims: [{ type: 'email' } as Claim] }), ConfigError);
+  assert.throws(() => c.authorizeUrl('one_time', {
+    claims: [{ name: 'email', type: 'email' }, { name: 'email', type: 'text' }],
+  }), ConfigError);
+});
+
+// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+test('authorizeUrl carries the verified requirement', () => {
+  const c = new OAuthClient(idwCfg());
+  const { q } = parseUrl(c.authorizeUrl('signin', {
+    claims: [{ name: 'email', type: 'email', verified: true }],
+  }));
+  const parsed = JSON.parse(q.get('claims')!);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].verified, true);
+});
+
 test('authorizeUrl caps 15 claims', () => {
   const c = new OAuthClient(idwCfg());
-  const claims: Claim[] = Array.from({ length: 30 }, () => ({ type: 'text' }));
+  const claims: Claim[] = Array.from({ length: 30 }, (_, i) => ({ name: `c${i}`, type: 'text' }));
   const { q } = parseUrl(c.authorizeUrl('one_time', { claims }));
   assert.equal(JSON.parse(q.get('claims')!).length, 15);
 });
@@ -143,14 +165,17 @@ test('authorizeUrl invalid mode throws', () => {
 test('exchange + userinfo', async () => {
   const t = new FakeTransport();
   t.queuePost(new FakeResponse(200, { access_token: 'AT', mode: 'signin' }));
-  t.queueGet(new FakeResponse(200, { sub: 'u1', share_code: 'AB12CD', display_name: 'Alice', mode: 'signin', two_factor: false }));
+  t.queueGet(new FakeResponse(200, { sub: 'AB12CD', share_code: 'AB12CD', mode: 'signin', two_factor: false }));
   const c = new OAuthClient(idwCfg(), { transport: t });
   const tok = await c.exchangeCode('CODE', 'V');
   assert.equal(tok.access_token, 'AT');
   assert.equal(t.posts[0].form.grant_type, 'authorization_code');
   assert.equal(t.posts[0].form.code_verifier, 'V');
   const info = await c.userinfo('AT');
-  assert.equal(info.display_name, 'Alice');
+  // #498 §5: `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
+  assert.equal(info.sub, 'AB12CD');
+  assert.equal(info.sub, info.share_code);
+  assert.equal(info.display_name, undefined);
 });
 
 test('completeSignIn decrypts one_time values', async () => {
@@ -162,14 +187,16 @@ test('completeSignIn decrypts one_time values', async () => {
     const t = new FakeTransport();
     t.queuePost(new FakeResponse(200, { access_token: 'AT', mode: 'one_time' }));
     t.queueGet(new FakeResponse(200, {
-      sub: 'u1', share_code: 'AB12CD', display_name: 'Alice', mode: 'one_time', two_factor: true,
+      sub: 'AB12CD', share_code: 'AB12CD', mode: 'one_time', two_factor: true,
       values: { email_personal: VECTOR.text.wrapper },
     }));
     const c = new OAuthClient(cfg, { transport: t });
     const out = await c.completeSignIn('CODE', 'V');
     assert.equal(out.mode, 'one_time');
     assert.equal(out.two_factor, true);
-    assert.equal(out.user.display_name, 'Alice');
+    assert.equal(out.user.sub, 'AB12CD');
+    // #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+    assert.deepEqual(out.attestations, {});
     assert.equal(out.values.email_personal, VECTOR.text.plaintext);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -118,6 +118,7 @@ export type { Headers } from './webhooks.js';
 // "Sign in with allme" — RP-side OAuth (#195)
 export { OAuthClient, DEFAULT_AUTHORIZE_URL } from './oauth.js';
 export type {
+  Attestation,
   Claim,
   SignInMode,
   ResponseMode,
