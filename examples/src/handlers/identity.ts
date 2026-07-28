@@ -13,7 +13,7 @@ import {
 import * as oidc from 'openid-client';
 
 import { generatePkce } from '../pkce.js';
-import { Runtime, type RunRecord } from '../runtime.js';
+import { Runtime, addCall, type RunRecord } from '../runtime.js';
 import { TimeoutTransport } from '../timeoutTransport.js';
 import { sendJson, str } from '../http.js';
 
@@ -64,6 +64,60 @@ const NO_ORIGIN =
   'no_origin — this request carried no Host header, so the OAuth redirect URI cannot be derived from ' +
   'the origin your browser is using. Open the example by its address (http://<host>:<port>/) and save ' +
   'the setup again.';
+
+/**
+ * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+ * scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+ * parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
+ * six SDK examples — only the method reference is written in the language's own idiom — so one scenario
+ * teaches one thing whichever example a reader starts. Keep them in step when this handler changes: the
+ * panel is headed "What just happened", and a list that no longer matches the code is worse than a short
+ * one.
+ */
+const CALL_IDW_BUILD =
+  'OAuthClient.fromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI';
+const CALL_IDW_BUILD_LOCAL =
+  'new OAuthClient(Config.fromIdwFile(…)) — builds the RP client from the saved config file: client id, secret and the registered redirect URI';
+const CALL_AUTH_SIGNIN =
+  'OAuthClient.authorizeUrl — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)';
+const CALL_AUTH_SIGNIN_DETACHED =
+  'OAuthClient.authorizeUrl — the sign-in URL behind the link + QR (mode signin, response_mode detached, PKCE S256, state = this run id)';
+const CALL_AUTH_ONE_TIME =
+  'OAuthClient.authorizeUrl — the consent URL the person is sent to (mode one_time, claims email + phone, PKCE S256, state = this run id)';
+const CALL_AUTH_CONNECT =
+  'OAuthClient.authorizeUrl — the consent URL the person is sent to (mode connect, PKCE S256, state = this run id)';
+const CALL_AUTH_ENROLL =
+  'OAuthClient.authorizeUrl — the enrollment URL the person is sent to (mode 2fa_enroll, response_mode redirect)';
+const CALL_AUTH_ENROLL_DETACHED =
+  'OAuthClient.authorizeUrl — the enrollment URL behind the link + QR (mode 2fa_enroll, response_mode detached)';
+const CALL_POLL_SIGNIN =
+  'OAuthClient.pollResult — polls POST /oauth2/result until the phone delivers the code (one 2s-bounded call per browser poll)';
+const CALL_POLL_ENROLL =
+  'OAuthClient.pollResult — polls POST /oauth2/result until the phone delivers {enrolled: true} (one 2s-bounded call per browser poll)';
+const CALL_COMPLETE_SIGNIN =
+  'OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; mode signin returns the identity only, no claim values';
+const CALL_COMPLETE_ONE_TIME =
+  'OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key';
+const CALL_COMPLETE_CONNECT =
+  'OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below';
+const CALL_ENROLLED_CALLBACK =
+  '(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call';
+const CALL_SERVICE_BUILD =
+  'Client.fromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase';
+const CALL_CONNECTIONS_LIVE =
+  "Client.connections — pages GET /api/company-data/connections and decrypts each person's values with the service key; the run keeps the one whose share code just signed in";
+const CALL_TWO_FACTOR = 'Client.twoFactor — the service-2FA sub-client, on the same data-client credentials';
+const CALL_CHALLENGE =
+  "TwoFactorClient.challenge — POST /api/service-2fa/challenges for the person's share code with a per-run idempotency key; returns the challenge id, plus matching digits when the service has number matching on";
+const CALL_WAIT_RESULT =
+  'TwoFactorClient.waitForResult — polls GET /api/service-2fa/challenges/{id} until the status leaves pending: approved, denied, expired or revoked (one 2s-bounded call per browser poll; the first terminal read burns the result)';
+const CALL_OIDC_DISCOVERY =
+  '(oidc) discovery — discovery: fetches /.well-known/openid-configuration from the configured API base';
+const CALL_OIDC_AUTH_URL =
+  '(oidc) buildAuthorizationUrl — the authorization URL (scope openid profile email, PKCE S256, nonce, state = this run id)';
+const CALL_OIDC_COMPLETE =
+  "(oidc) authorizationCodeGrant — exchanges the code at the discovered token endpoint (client_secret_post + PKCE verifier), then verifies the id_token against the JWKS: signature, issuer, audience and nonce; the claims shown are that verified token's";
+
 
 export class IdentityHandler {
   constructor(private readonly rt: Runtime) {}
@@ -155,10 +209,13 @@ export class IdentityHandler {
         run.verifier = pkce.verifier;
         const mode = id === 1 ? 'signin' : id === 3 ? 'one_time' : 'connect';
         const claims: Claim[] = id === 3 ? this.claimObjects((this.rt.readConfigMeta(idStr).claims as string[]) ?? []) : [];
+        run.calls = [
+          this.idwBuildCall(idStr),
+          id === 3 ? CALL_AUTH_ONE_TIME : id === 4 ? CALL_AUTH_CONNECT : CALL_AUTH_SIGNIN,
+        ];
         const oauth = this.oauthClientFor(idStr);
         // redirectUri omitted → the OAuthClient uses its config's oauth_redirect_uri.
         const url = oauth.authorizeUrl(mode, { claims, state: runId, responseMode: 'redirect', codeChallenge: pkce.challenge });
-        run.calls = ['OAuthClient.authorizeUrl'];
         this.rt.writeRun(runId, run);
         return sendJson(res, { runId, action: { type: 'redirect', url } });
       }
@@ -168,9 +225,9 @@ export class IdentityHandler {
         const pkce = generatePkce();
         run.verifier = pkce.verifier;
         run.wait = 'detached_signin';
+        run.calls = [this.idwBuildCall(idStr), CALL_AUTH_SIGNIN_DETACHED];
         const oauth = this.oauthClientFor(idStr);
         const url = oauth.authorizeUrl('signin', { state: runId, responseMode: 'detached', codeChallenge: pkce.challenge });
-        run.calls = ['OAuthClient.authorizeUrl'];
         this.rt.writeRun(runId, run);
         return sendJson(res, { runId, action: { type: 'detached', url } });
       }
@@ -192,7 +249,7 @@ export class IdentityHandler {
           code_challenge: challenge,
           code_challenge_method: 'S256',
         });
-        run.calls = ['(oidc) discovery', '(oidc) buildAuthorizationUrl'];
+        run.calls = [CALL_OIDC_DISCOVERY, CALL_OIDC_AUTH_URL];
         this.rt.writeRun(runId, run);
         return sendJson(res, { runId, action: { type: 'redirect', url: url.href } });
       }
@@ -204,10 +261,10 @@ export class IdentityHandler {
         const context = str(meta.context) !== '' ? str(meta.context) : null;
         const idempotencyKey = `demo-${runId}`.slice(0, 64); // backend-generated, per-run (SDK requires it)
         run.wait = 'challenge';
+        run.calls = [CALL_SERVICE_BUILD, CALL_TWO_FACTOR, CALL_CHALLENGE];
         const client = this.serviceClientFor(idStr);
         const challenge = await client.twoFactor.challenge(shareCode, { context, idempotencyKey });
         run.challengeId = challenge.challengeId;
-        run.calls = ['Client.twoFactor', 'TwoFactorClient.challenge'];
         this.rt.writeRun(runId, run);
         return sendJson(res, { runId, action: { type: 'challenge', matchingDigits: challenge.matchingDigits } });
       }
@@ -232,7 +289,7 @@ export class IdentityHandler {
       isEnroll: true,
       status: 'pending',
       state: runId,
-      calls: ['OAuthClient.authorizeUrl'],
+      calls: [this.idwBuildCall(idStr), responseMode === 'detached' ? CALL_AUTH_ENROLL_DETACHED : CALL_AUTH_ENROLL],
       wait: responseMode === 'detached' ? 'detached_enroll' : 'enroll_redirect',
     };
     this.rt.writeRun(runId, run);
@@ -258,7 +315,7 @@ export class IdentityHandler {
         // Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
         run.status = 'done';
         run.result = { enrolled: true };
-        (run.calls as string[]).push('callback(enrolled=true)');
+        run.calls = addCall(run.calls, CALL_ENROLLED_CALLBACK);
       } else if (url.searchParams.get('code')) {
         const code = url.searchParams.get('code')!;
         if (id === 5 || id === 6) {
@@ -304,26 +361,25 @@ export class IdentityHandler {
     const wait = run.wait as string | undefined;
     const id = Number(run.scenario ?? 0);
     const idStr = String(id);
-    const calls = run.calls as string[];
     try {
       if (wait === 'detached_signin') {
+        run.calls = addCall(run.calls, CALL_POLL_SIGNIN);
         const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
         const body = await oauth.pollResult(String(run.state), { timeout: 2, interval: 2 });
-        calls.push('OAuthClient.pollResult');
         const code = str(body.code);
         if (code !== '') await this.completeSignin(run, code, id);
       } else if (wait === 'detached_enroll') {
+        run.calls = addCall(run.calls, CALL_POLL_ENROLL);
         const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
         const body = await oauth.pollResult(String(run.state), { timeout: 2, interval: 2 });
-        calls.push('OAuthClient.pollResult');
         if (body.enrolled) {
           run.status = 'done';
           run.result = { enrolled: true };
         }
       } else if (wait === 'challenge') {
+        run.calls = addCall(run.calls, CALL_WAIT_RESULT);
         const client = this.serviceClientFor(idStr, POLL_TIMEOUT_MS);
         const r = await client.twoFactor.waitForResult(String(run.challengeId), { timeout: 2, interval: 2 });
-        calls.push('TwoFactorClient.waitForResult');
         run.status = 'done';
         run.result = { status: r.status, completed_at: r.completedAt };
       }
@@ -349,9 +405,12 @@ export class IdentityHandler {
    */
   private async completeSignin(run: RunRecord, code: string, id: number): Promise<void> {
     const idStr = String(id);
+    run.calls = addCall(
+      run.calls,
+      id === 3 ? CALL_COMPLETE_ONE_TIME : id === 4 ? CALL_COMPLETE_CONNECT : CALL_COMPLETE_SIGNIN,
+    );
     const oauth = this.oauthClientFor(idStr);
     const out = await oauth.completeSignIn(code, run.verifier ? String(run.verifier) : undefined);
-    (run.calls as string[]).push('OAuthClient.completeSignIn');
     const result: Record<string, unknown> = {
       user: out.user ?? null,
       mode: out.mode ?? null,
@@ -362,7 +421,9 @@ export class IdentityHandler {
     if (id === 4) {
       // Connect: read the person's LIVE values via the service data client.
       const shareCode = str(out.user?.share_code);
+      run.calls = addCall(run.calls, CALL_SERVICE_BUILD);
       const client = this.serviceClientFor(idStr);
+      run.calls = addCall(run.calls, CALL_CONNECTIONS_LIVE);
       let live: Record<string, unknown> = {};
       for await (const conn of client.connections()) {
         if (shareCode !== '' && conn.shareCode === shareCode) {
@@ -370,7 +431,6 @@ export class IdentityHandler {
           break;
         }
       }
-      (run.calls as string[]).push('Client.connections');
       result.live_values = live;
     }
 
@@ -382,12 +442,13 @@ export class IdentityHandler {
   private async completeOidc(run: RunRecord, currentUrl: URL, host: string): Promise<void> {
     const idStr = String(Number(run.scenario ?? 0));
     const config = await this.oidcConfigFor(idStr, host);
+    run.calls = addCall(run.calls, CALL_OIDC_DISCOVERY);
+    run.calls = addCall(run.calls, CALL_OIDC_COMPLETE);
     const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
       pkceCodeVerifier: String(run.verifier ?? ''),
       expectedNonce: String(run.nonce ?? ''),
       expectedState: String(run.state ?? ''),
     });
-    (run.calls as string[]).push('(oidc) discovery', '(oidc) authorizationCodeGrant');
     run.status = 'done';
     run.result = { claims: tokens.claims() ?? null };
   }
@@ -403,14 +464,28 @@ export class IdentityHandler {
    */
   private oauthClientFor(idStr: string, pollTimeoutMs?: number): OAuthClient {
     const path = this.rt.configPathFor(idStr);
-    const base = str(this.rt.readConfigMeta(idStr).authorize_base);
     const opts: OAuthClientOptions = {};
     if (pollTimeoutMs !== undefined) opts.transport = new TimeoutTransport(pollTimeoutMs);
-    if (base === '' || base === DEFAULT_AUTHORIZE_URL) {
+    if (this.usesDefaultAuthorizeBase(idStr)) {
       return OAuthClient.fromConfig(path, opts);
     }
-    opts.authorizeUrl = base;
+    opts.authorizeUrl = str(this.rt.readConfigMeta(idStr).authorize_base);
     return new OAuthClient(Config.fromIdwFile(path), opts);
+  }
+
+  /**
+   * Whether `oauthClientFor` takes the named-constructor branch. The SAME predicate decides the client AND
+   * the trace entry, so the panel can never name a constructor that did not run (#578) — the local-stack
+   * option really does build the client a different way.
+   */
+  private usesDefaultAuthorizeBase(idStr: string): boolean {
+    const base = str(this.rt.readConfigMeta(idStr).authorize_base);
+    return base === '' || base === DEFAULT_AUTHORIZE_URL;
+  }
+
+  /** The trace entry for the OAuth client `oauthClientFor` just built (#578). */
+  private idwBuildCall(idStr: string): string {
+    return this.usesDefaultAuthorizeBase(idStr) ? CALL_IDW_BUILD : CALL_IDW_BUILD_LOCAL;
   }
 
   /** Build the service data client OFF the scenario's config file (service role). */

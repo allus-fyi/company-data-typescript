@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { BinaryHandle, Client, WebhookError, type Change, type Headers } from '@allus-fyi/company-data';
 
-import { Runtime, type RunRecord } from '../runtime.js';
+import { Runtime, recordCall, type RunRecord } from '../runtime.js';
 import { TimeoutTransport } from '../timeoutTransport.js';
 import { headerValue, readRawBody, sendJson, sendText, str } from '../http.js';
 
@@ -46,6 +46,32 @@ const DEFAULT_API_URL = 'https://api.allme.fyi';
 
 /** Short HTTP timeout (ms) for the per-poll drainBatch() feed fetch — bounds one worker per poll. */
 const FEED_TIMEOUT_MS = 2000;
+
+/**
+ * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+ * scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+ * parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
+ * six SDK examples — only the method reference is written in the language's own idiom — so one scenario
+ * teaches one thing whichever example a reader starts. Keep them in step when this handler changes.
+ */
+const CALL_SERVICE_BUILD =
+  'Client.fromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase';
+const CALL_CONNECTIONS =
+  "Client.connections — pages GET /api/company-data/connections: loads your request-field catalog first for value typing, then decrypts each person's values with the service key";
+const CALL_REQUEST_FIELDS =
+  'Client.requestFields — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client';
+const CALL_PROCESS_CHANGES =
+  'Client.processChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store';
+const CALL_CREATE_DOCUMENT = 'Client.createDocument — {label}';
+const CALL_WEBHOOK_STARTED =
+  '(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback';
+const CALL_VERIFY_WEBHOOK =
+  "Client.verifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401";
+const CALL_PARSE_WEBHOOK =
+  'Client.parseWebhook — turns the verified body into a typed Change, decrypting its value with the service key';
+const CALL_DRAIN_BATCH =
+  'Client.drainBatch — the per-poll feed fallback: one unbuffered drain, so events still show up when no delivery can reach this machine';
+
 
 export class CompanyDataHandler {
   constructor(private readonly rt: Runtime) {}
@@ -119,6 +145,7 @@ export class CompanyDataHandler {
     const runId = this.rt.newRunId();
     const calls: string[] = [];
     try {
+      calls.push(CALL_SERVICE_BUILD);
       const client = Client.fromConfig(this.rt.configPathFor(id));
       let result: Record<string, unknown>;
       switch (id) {
@@ -149,6 +176,7 @@ export class CompanyDataHandler {
    * two people who both filled the same slug stay distinguishable.
    */
   private async doRead(client: Client, calls: string[]): Promise<Record<string, unknown>> {
+    calls.push(CALL_CONNECTIONS);
     const connections: unknown[] = [];
     for await (const conn of client.connections()) {
       const values = Object.entries(conn.values).map(([slug, v]) => ({
@@ -166,7 +194,6 @@ export class CompanyDataHandler {
         values,
       });
     }
-    calls.push('Client.connections');
     return { connections };
   }
 
@@ -175,6 +202,7 @@ export class CompanyDataHandler {
    * bool + one_time; the raw split flags are debug-only, off the intended surface).
    */
   private async doDefinitions(client: Client, calls: string[]): Promise<Record<string, unknown>> {
+    calls.push(CALL_REQUEST_FIELDS);
     const fields = (await client.requestFields()).map((f) => ({
       slug: f.slug,
       label: f.label,
@@ -182,7 +210,6 @@ export class CompanyDataHandler {
       mandatory: f.mandatory,
       one_time: f.oneTime,
     }));
-    calls.push('Client.requestFields');
     return { fields };
   }
 
@@ -192,6 +219,7 @@ export class CompanyDataHandler {
    * Each event is the rendered-column projection PLUS a raw object with the full public Change fields.
    */
   private async doChanges(client: Client, calls: string[]): Promise<Record<string, unknown>> {
+    calls.push(CALL_PROCESS_CHANGES);
     const events: unknown[] = [];
     const seen = new Set<string>();
     await client.processChanges((c: Change) => {
@@ -201,7 +229,6 @@ export class CompanyDataHandler {
       }
       events.push(this.projectChange(c, null));
     });
-    calls.push('Client.processChanges');
     return { events, drained: true };
   }
 
@@ -289,10 +316,10 @@ export class CompanyDataHandler {
         }
         opts.shareCode = shareCode;
       }
+      calls.push(CALL_CREATE_DOCUMENT.replace('{label}', spec.label));
       const doc = await client.createDocument(opts);
       docs.push({ index: i + 1, label: spec.label, document_id: doc.id, status: doc.status });
     }
-    calls.push(`Client.createDocument ×${specs.length}`);
     return { docs };
   }
 
@@ -315,7 +342,7 @@ export class CompanyDataHandler {
       events: [],
       seenFeedIds: [], // feed-only dedup set for the drainBatch() fallback
       unparseable: 0,
-      calls: ['(webhook run started — POST /webhook receives; each poll also drainBatch()s the feed)'],
+      calls: [CALL_WEBHOOK_STARTED],
     });
     this.rt.writeRoute(webhookId, runId);
     sendJson(res, { runId, action: { type: 'none' } });
@@ -342,15 +369,16 @@ export class CompanyDataHandler {
     const run = this.rt.readRun(route.runId);
     if (run === null) return sendText(res, 'discarded: no active webhook run', 200);
 
+    this.recordCall(run, CALL_SERVICE_BUILD);
     const client = Client.fromConfig(this.rt.configPathFor(WEBHOOK));
-    this.recordCall(run, 'Client.verifyWebhook');
+    this.recordCall(run, CALL_VERIFY_WEBHOOK);
     if (!client.verifyWebhook(rawBody, headers)) {
       // A genuine signature failure — persist the attempted verify so the calls trace stays truthful.
       this.rt.writeRun(route.runId, run);
       return sendText(res, 'signature verification failed', 401);
     }
     try {
-      this.recordCall(run, 'Client.parseWebhook');
+      this.recordCall(run, CALL_PARSE_WEBHOOK);
       const change = client.parseWebhook(rawBody, headers);
       (run.events as unknown[]).push(this.projectChange(change, 'webhook'));
     } catch (e) {
@@ -406,12 +434,13 @@ export class CompanyDataHandler {
 
     const seen = new Set<string>((run.seenFeedIds as string[] | undefined) ?? []);
     try {
+      const buildNew = this.recordCall(run, CALL_SERVICE_BUILD);
       const client = Client.fromConfig(this.rt.configPathFor(WEBHOOK), {
         httpOptions: { transport: new TimeoutTransport(FEED_TIMEOUT_MS) },
       });
       // Every poll ATTEMPTS the feed pull — record the call now (deduped), so an empty poll still reports
       // the drainBatch it performed rather than claiming no call.
-      const drainNew = this.recordCall(run, 'Client.drainBatch');
+      const drainNew = this.recordCall(run, CALL_DRAIN_BATCH);
       let appended = false;
       for (const change of await client.drainBatch()) {
         if (change.id) {
@@ -422,7 +451,7 @@ export class CompanyDataHandler {
         (run.events as unknown[]).push(this.projectChange(change, 'feed'));
         appended = true;
       }
-      if (appended || drainNew) this.rt.writeRun(runId, run);
+      if (appended || drainNew || buildNew) this.rt.writeRun(runId, run);
     } catch {
       // A blackholed/failed feed fetch must not fail the accumulating webhook run.
     }
@@ -435,10 +464,7 @@ export class CompanyDataHandler {
    * added (so the caller can persist on that transition).
    */
   private recordCall(run: RunRecord, name: string): boolean {
-    const calls = (run.calls as string[] | undefined) ?? (run.calls = []);
-    if (calls.includes(name)) return false;
-    calls.push(name);
-    return true;
+    return recordCall(run, name); // ONE implementation for all three families (standards §1)
   }
 
   // ── Change projection ──────────────────────────────────────────────────

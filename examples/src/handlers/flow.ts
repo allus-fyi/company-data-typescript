@@ -2,7 +2,7 @@ import type { ServerResponse } from 'node:http';
 
 import { ApiError, Client, ConfigError, FlowRun, ValidationError } from '@allus-fyi/company-data';
 
-import { Runtime, type RunRecord } from '../runtime.js';
+import { Runtime, addCall, type RunRecord } from '../runtime.js';
 import { sendJson, str } from '../http.js';
 
 /**
@@ -37,6 +37,29 @@ const PARTY_CUSTOMER = 'customer';
 
 /** The canned INVALID value the validation-demo submits once for an email field. */
 const INVALID_EMAIL = 'not-an-email';
+
+/**
+ * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+ * scenario>`, appended AT the call site, in the order the calls were made. The annotations are
+ * byte-identical in all six SDK examples — only the method reference is written in the language's own
+ * idiom — so one scenario teaches one thing whichever example a reader starts. Keep them in step when
+ * this handler changes.
+ */
+const CALL_SERVICE_BUILD =
+  'Client.fromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase';
+const CALL_IDENTITY =
+  "Client.identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";
+const CALL_CONNECTION =
+  "Client.connection — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to";
+const CALL_TRIGGER =
+  "Client.triggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version";
+const CALL_FLOW_RUN = 'Client.flowRun — re-read on every poll to see whose turn the run is on';
+const CALL_PROCESS =
+  'Client.processFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf';
+const CALL_ANSWERS = "Client.flowRunAnswers — the completed run's answers, decrypted with the service key";
+const CALL_DOCUMENT =
+  "Client.flowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key";
+
 
 export class FlowHandler {
   constructor(private readonly rt: Runtime) {}
@@ -110,19 +133,20 @@ export class FlowHandler {
     const calls: string[] = [];
     let flowRunId: string;
     try {
+      calls.push(CALL_SERVICE_BUILD);
       const client = this.serviceClient();
 
       // The COMPANY party binds to this service's own company_user_id.
+      calls.push(CALL_IDENTITY);
       const identity = await client.identity();
-      calls.push('Client.identity');
       const companyUserId = identity.company_user_id;
       if (companyUserId === '') {
         return sendJson(res, { error: 'identity_error', message: 'identity() returned no company_user_id' }, 502);
       }
 
       // The CUSTOMER party binds to the connected person's public personId.
+      calls.push(CALL_CONNECTION);
       const connection = await client.connection(connectionId);
-      calls.push('Client.connection');
       const personId = connection.personId;
       if (personId === '') {
         return sendJson(
@@ -133,8 +157,8 @@ export class FlowHandler {
       }
 
       const bindings = { [PARTY_COMPANY]: companyUserId, [PARTY_CUSTOMER]: personId };
+      calls.push(CALL_TRIGGER);
       const flowRun = await client.triggerFlowRun(flowId, { connectionId, bindings });
-      calls.push('Client.triggerFlowRun');
 
       flowRunId = flowRun.id;
       if (flowRunId === '') {
@@ -190,9 +214,10 @@ export class FlowHandler {
     }
 
     try {
+      run.calls = addCall(run.calls, CALL_SERVICE_BUILD);
       const client = this.serviceClient();
+      run.calls = addCall(run.calls, CALL_FLOW_RUN);
       const flowRun = await client.flowRun(flowRunId);
-      run.calls = this.addCall(run.calls, 'Client.flowRun');
 
       const status = flowRun.status ?? '';
       const companyParty = flowRun.companyPartyKey;
@@ -256,9 +281,9 @@ export class FlowHandler {
     };
 
     const steps = (run.steps as unknown[]) ?? [];
+    run.calls = addCall(run.calls, CALL_PROCESS);
     try {
       await client.processFlowRun(flowRunId, fillNode);
-      run.calls = this.addCall(run.calls, 'Client.processFlowRun');
       // Advanced: every field filled for this node was accepted.
       for (const f of filled) {
         steps.push({ slug: f.slug, type: f.type, submitted: f.submitted, accepted: true });
@@ -270,7 +295,6 @@ export class FlowHandler {
       if (!(e instanceof ValidationError)) throw e;
       // The canned invalid value was rejected BEFORE submit — record it and mark the node so the next
       // poll submits the valid value. The node did NOT advance.
-      run.calls = this.addCall(run.calls, 'Client.processFlowRun');
       let submitted = INVALID_EMAIL;
       for (const f of filled) {
         if (f.slug === e.slug) {
@@ -303,14 +327,14 @@ export class FlowHandler {
     flowRun: FlowRun,
     flowRunId: string,
   ): Promise<RunRecord> {
+    run.calls = addCall(run.calls, CALL_ANSWERS);
     const answers = await client.flowRunAnswers(flowRun);
-    run.calls = this.addCall(run.calls, 'Client.flowRunAnswers');
     run.answers = Object.entries(answers).map(([slug, value]) => ({ slug, value }));
 
     if (flowRun.outputMode === 'document') {
       try {
+        run.calls = addCall(run.calls, CALL_DOCUMENT);
         const bytes = await client.flowRunDocument(flowRunId);
-        run.calls = this.addCall(run.calls, 'Client.flowRunDocument');
         run.document = { status: 'downloaded', downloaded: true, bytes: bytes.length };
       } catch (e) {
         if (!(e instanceof ApiError)) throw e;
@@ -353,13 +377,6 @@ export class FlowHandler {
   /** Build the service data client OFF the scenario's config file (service role, Config.fromFile). */
   private serviceClient(): Client {
     return Client.fromConfig(this.rt.configPathFor(SCENARIO));
-  }
-
-  /** Append a call name preserving first-occurrence order (a poll may repeat flowRun across polls). */
-  private addCall(calls: string[] | undefined, name: string): string[] {
-    const out = (calls ?? []).map(String);
-    if (!out.includes(name)) out.push(name);
-    return out;
   }
 }
 
