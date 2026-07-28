@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { VERSION } from '@allus-fyi/company-data';
 
+import { sendFailure } from '../src/http.js';
 import { Runtime } from '../src/runtime.js';
 import { Server, CONTRACT_VERSION } from '../src/server.js';
 
@@ -71,11 +72,12 @@ async function main(): Promise<void> {
   // 4 + 5. serve — SINGLE process
   const port = Number(process.env.PORT ?? 8091);
   const server = new Server(rt, frontend, VERSION);
+  // Last-resort net BEHIND Server.handle()'s own guard — through the SAME `sendFailure` helper, so this
+  // process has exactly ONE failure envelope (#583 review pass 1). It used to write `{"error":
+  // "server_error", "message": "<reason>"}` by hand, and the suite renders `error` and nothing else, so
+  // anything reaching it arrived as one uninformative word with the reason stranded in `message`.
   const http = createServer((req, res) => {
-    server.handle(req, res).catch((e) => {
-      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'server_error', message: (e as Error).message }));
-    });
+    server.handle(req, res).catch((e) => sendFailure(res, e));
   });
 
   http.on('error', (e: NodeJS.ErrnoException) => {

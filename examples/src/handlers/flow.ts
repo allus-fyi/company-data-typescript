@@ -3,7 +3,7 @@ import type { ServerResponse } from 'node:http';
 import { ApiError, Client, ConfigError, FlowRun, ValidationError } from '@allus-fyi/company-data';
 
 import { Runtime, addCall, type RunRecord } from '../runtime.js';
-import { sendJson, str } from '../http.js';
+import { sendFailure, sendJson, str } from '../http.js';
 
 /**
  * The FLOW scenario family — the ONE contract-flow scenario "flow:run". Everything the handler does goes
@@ -141,7 +141,7 @@ export class FlowHandler {
       const identity = await client.identity();
       const companyUserId = identity.company_user_id;
       if (companyUserId === '') {
-        return sendJson(res, { error: 'identity_error', message: 'identity() returned no company_user_id' }, 502);
+        return sendFailure(res, 'identity() returned no company_user_id', 'identity_error', 502);
       }
 
       // The CUSTOMER party binds to the connected person's public personId.
@@ -149,9 +149,10 @@ export class FlowHandler {
       const connection = await client.connection(connectionId);
       const personId = connection.personId;
       if (personId === '') {
-        return sendJson(
+        return sendFailure(
           res,
-          { error: 'connection_error', message: `connection ${connectionId} has no personId (not found or not connected)` },
+          `connection ${connectionId} has no personId (not found or not connected)`,
+          'connection_error',
           502,
         );
       }
@@ -162,11 +163,11 @@ export class FlowHandler {
 
       flowRunId = flowRun.id;
       if (flowRunId === '') {
-        return sendJson(res, { error: 'trigger_error', message: 'triggerFlowRun returned no run id' }, 502);
+        return sendFailure(res, 'triggerFlowRun returned no run id', 'trigger_error', 502);
       }
     } catch (e) {
       if (e instanceof ApiError || e instanceof ConfigError) {
-        return sendJson(res, { error: 'start_failed', message: e.message }, 502);
+        return sendFailure(res, e, 'start_failed', 502);
       }
       throw e;
     }

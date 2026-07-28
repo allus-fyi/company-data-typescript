@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { Runtime, type RunRecord } from './runtime.js';
-import { readJsonBody, sendJson, serveStatic } from './http.js';
+import { readJsonBody, sendFailure, sendJson, serveStatic } from './http.js';
 import { IdentityHandler } from './handlers/identity.js';
 import { FlowHandler } from './handlers/flow.js';
 import { CompanyDataHandler } from './handlers/companyData.js';
@@ -42,19 +42,24 @@ export class Server {
   // ── entry point ────────────────────────────────────────────────────────
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    this.rt.ensureDirs();
-    this.rt.sweep(); // lazy TTL sweep on every request
-
-    const method = req.method ?? 'GET';
-    // The browser's own origin, verbatim — NEVER a default synthesised from the port (#574). An empty
-    // host reaches the identity handlers as '' and is refused there with a clear message; the parse base
-    // below only has to make req.url's path and query readable, so it uses a host that cannot resolve
-    // rather than a plausible-looking one.
-    const host = String(req.headers.host ?? '').trim();
-    const url = new URL(req.url ?? '/', `http://${host || 'no-host.invalid'}`);
-    const path = decodeURIComponent(url.pathname);
-
+    // EVERYTHING is inside the guard — request PREPROCESSING included (#583 review pass 1). Setup and
+    // parsing throw as readily as a handler does: `this.rt.ensureDirs()` on an unwritable `.runtime/`,
+    // and `decodeURIComponent` on a malformed percent-escape (`GET /api/scenarios/5/start%` → Node hands
+    // the raw target through, and `decodeURIComponent` raises `URIError: URI malformed`). Preprocessing
+    // placed ABOVE the try left those escaping to the launcher, which is not where the envelope lives.
     try {
+      this.rt.ensureDirs();
+      this.rt.sweep(); // lazy TTL sweep on every request
+
+      const method = req.method ?? 'GET';
+      // The browser's own origin, verbatim — NEVER a default synthesised from the port (#574). An empty
+      // host reaches the identity handlers as '' and is refused there with a clear message; the parse base
+      // below only has to make req.url's path and query readable, so it uses a host that cannot resolve
+      // rather than a plausible-looking one.
+      const host = String(req.headers.host ?? '').trim();
+      const url = new URL(req.url ?? '/', `http://${host || 'no-host.invalid'}`);
+      const path = decodeURIComponent(url.pathname);
+
       let m: RegExpMatchArray | null;
       if (path === '/api/meta' && method === 'GET') {
         this.meta(res);
@@ -82,8 +87,8 @@ export class Server {
       }
     } catch (e) {
       // A start-time / handler failure surfaces as a NON-2xx the shared client raises — never a 200
-      // without the success envelope.
-      sendJson(res, { error: 'server_error', message: (e as Error).message }, 500);
+      // without the success envelope. The reason rides in `error`, the only key the suite renders (#583).
+      sendFailure(res, e);
     }
   }
 

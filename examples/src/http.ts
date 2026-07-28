@@ -32,6 +32,41 @@ export function sendJson(res: ServerResponse, data: unknown, status = 200): void
   res.end(JSON.stringify(data));
 }
 
+/**
+ * The contract's FAILURE envelope (#583): `{"error": "<token> — <reason>", "message": "<reason>"}`.
+ *
+ * The suite's shared client raises `body.error` VERBATIM and ignores every other key (`api.js`:
+ * `throw new Error(body.error || 'start failed (…)')`), so a bare token in `error` reaches the
+ * developer as one uninformative word and the REASON — which the backend has right there — is
+ * dropped. That is the swallowed failure of standards.html §9: a failure converted into something
+ * indistinguishable from any other failure. The token is kept and the reason appended in the shape
+ * this contract already uses for exactly this (`no_origin — …`, #574); `message` keeps the bare
+ * reason for a programmatic reader.
+ *
+ * `reason` may be a thrown value or a sentence. A thrown non-Error (or an `Error` with an empty
+ * message) would otherwise report nothing at all, so it is stringified rather than dropped.
+ *
+ * NOT used for the token-only refusals the suite handles by STATUS rather than body — `409
+ * not_configured` (`startScenario` maps the 409 before reading the body) and `404 not_found`.
+ *
+ * A failure raised AFTER the first byte is on the wire cannot be re-answered by anyone (a static file
+ * is streamed, so this is reachable), and `writeHead` would itself throw there. It is reported on
+ * stderr instead of being swallowed — standards §9's "emit a distinguishable marker" for the one path
+ * where the envelope is no longer available. Handling it HERE keeps one implementation for every
+ * caller, including the launcher's last-resort guard (standards §1).
+ */
+export function sendFailure(res: ServerResponse, reason: unknown, token = 'server_error', status = 500): void {
+  let text = (reason instanceof Error ? reason.message : String(reason)).trim();
+  if (!text && reason instanceof Error) text = reason.name;
+  const shown = text || 'no reason was reported';
+  if (res.headersSent) {
+    process.stderr.write(`example-suite ${token}: ${shown} (response already started — cannot answer)\n`);
+    res.end();
+    return;
+  }
+  sendJson(res, { error: `${token} — ${shown}`, message: text }, status);
+}
+
 export function sendText(res: ServerResponse, body: string, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end(body);
