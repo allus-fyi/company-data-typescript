@@ -56,10 +56,22 @@ npm start                             # -> serves http://localhost:8091
 the example), which wipes `.runtime/` (fresh state every boot), fetches and **sha256-verifies** the
 pinned frontend release named in `frontend.lock` into `.frontend/` (a present, verified bundle is a
 cache hit), checks the bundle's `contract.json` version against the backend's, refuses a busy port with
-a clear message, then serves **the whole example test suite — all three scenario families — on
-http://localhost:8091**.
+a clear message, then serves **the whole example test suite — all three scenario families — on port
+8091, bound to all interfaces**, printing every URL it is reachable on.
 
 Then open <http://localhost:8091> and pick a scenario.
+
+**From a phone or another machine on the same network.** The server binds **all
+interfaces**, so any device on your network can reach it — startup prints the exact
+`http://<your-lan-ip>:8091` URL to type, alongside the localhost one. Open that URL on
+the phone and press **Save** there: the redirect URI written into the config file
+follows the origin you used, so register the same `http://<your-lan-ip>:8091/callback`
+on your OAuth app. Binding all interfaces also means **anyone on your network can reach
+this demo**, and its setup panels accept and store real credentials under
+`.runtime/config/` — OAuth and data-client secrets, private-key PEMs and their
+passphrases, and webhook signing secrets. It is a local developer example, not a
+hardened service: run it only on a network you trust, and only with sandbox
+credentials.
 
 **Port.** `8091` is the default, overridable with `PORT=<n> npm start`. The default is deliberately the
 same across all SDK examples (one browser origin ⇒ your localStorage setup carries across SDKs), so

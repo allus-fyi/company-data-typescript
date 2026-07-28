@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,7 +21,9 @@ import { Server, CONTRACT_VERSION } from '../src/server.js';
  *      unpack to .frontend/<tag>/  (a present, verified bundle is a cache hit — nothing is re-fetched)
  *   3. assert the bundle's contract.json version == the backend's implemented CONTRACT_VERSION
  *   4. refuse a busy port with a clear message
- *   5. serve bundle + API + /callback + public /webhook on ONE port — SINGLE process = single worker
+ *   5. serve bundle + API + /callback + public /webhook on ONE port — SINGLE process = single worker,
+ *      bound to ALL interfaces so a phone on the same network can reach it, and printing every URL it
+ *      is reachable on (#553)
  */
 
 const RELEASE_BASE = 'https://github.com/allme-sdk/example-test-suite/releases/download';
@@ -85,9 +88,49 @@ async function main(): Promise<void> {
     fail(`server error: ${e.message}`);
   });
 
-  http.listen(port, 'localhost', () => {
-    log(`serving http://localhost:${port}  (Ctrl-C to stop)`);
+  // Omitting the host binds the unspecified address — :: (dual-stack, so IPv4 too) where IPv6 is
+  // available, 0.0.0.0 otherwise. ALL interfaces, so a phone on the same network can reach it (#553).
+  http.listen(port, () => {
+    printReachableUrls(port);
   });
+}
+
+/**
+ * Announce every URL the server is reachable on (#553).
+ *
+ * The server binds all interfaces, so a phone on the same network can reach it — but only if the
+ * person holding the phone knows which address to type. Print the loopback URL AND every non-loopback
+ * IPv4 address of this host, plus the plain warning that this is now open to the local network.
+ */
+function printReachableUrls(port: number): void {
+  log(`serving on ALL interfaces, port ${port}  (all three scenario families; Ctrl-C to stop)`);
+  log(`  on this machine:  http://localhost:${port}`);
+  const lan = lanAddresses();
+  if (lan.length === 0) {
+    log('  on this network:  (no non-loopback IPv4 address found — is this machine on a network?)');
+  } else {
+    lan.forEach((addr, i) => {
+      log(`${i === 0 ? '  on this network:  ' : '                    '}http://${addr}:${port}`);
+    });
+  }
+  log('  NOTE: anyone on your network can now reach this demo, and its setup panels accept and');
+  log('        store real credentials under .runtime/config/ — OAuth and data-client secrets,');
+  log('        private-key PEMs and their passphrases, and webhook signing secrets. It is a local');
+  log('        developer example, not a hardened service: run it only on a network you trust, and');
+  log('        only with sandbox credentials.');
+}
+
+/** Every non-loopback, non-link-local IPv4 address of this host (IPv6 literals are not phone-typeable). */
+function lanAddresses(): string[] {
+  const out: string[] = [];
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      if (a.address.startsWith('169.254.')) continue;
+      if (!out.includes(a.address)) out.push(a.address);
+    }
+  }
+  return out;
 }
 
 async function fetchBundle(frontend: string, tag: string, wantSha: string): Promise<void> {
