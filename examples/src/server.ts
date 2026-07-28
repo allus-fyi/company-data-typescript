@@ -33,7 +33,6 @@ export class Server {
     private readonly rt: Runtime,
     private readonly frontendDir: string,
     private readonly sdkVersion: string,
-    private readonly port: number,
   ) {
     this.identity = new IdentityHandler(rt);
     this.flow = new FlowHandler(rt);
@@ -47,8 +46,12 @@ export class Server {
     this.rt.sweep(); // lazy TTL sweep on every request
 
     const method = req.method ?? 'GET';
-    const host = String(req.headers.host ?? `localhost:${this.port}`);
-    const url = new URL(req.url ?? '/', `http://${host}`);
+    // The browser's own origin, verbatim — NEVER a default synthesised from the port (#574). An empty
+    // host reaches the identity handlers as '' and is refused there with a clear message; the parse base
+    // below only has to make req.url's path and query readable, so it uses a host that cannot resolve
+    // rather than a plausible-looking one.
+    const host = String(req.headers.host ?? '').trim();
+    const url = new URL(req.url ?? '/', `http://${host || 'no-host.invalid'}`);
     const path = decodeURIComponent(url.pathname);
 
     try {

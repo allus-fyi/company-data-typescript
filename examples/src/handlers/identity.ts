@@ -55,6 +55,16 @@ const DEFAULT_AUTHORIZE_BASE = DEFAULT_AUTHORIZE_URL; // https://web.allme.fyi/a
 /** Short-cycled poll timeout (ms) for the detached/challenge waits — bounds one worker per poll. */
 const POLL_TIMEOUT_MS = 2000;
 
+/**
+ * Refusal when the request carries no Host header, so the browser's origin is unknown (#574). There is NO
+ * default host: substituting one (localhost) silently sends the round-trip to a DIFFERENT origin than the
+ * browser is on — a different localStorage and a redirect URI the OAuth app never registered.
+ */
+const NO_ORIGIN =
+  'no_origin — this request carried no Host header, so the OAuth redirect URI cannot be derived from ' +
+  'the origin your browser is using. Open the example by its address (http://<host>:<port>/) and save ' +
+  'the setup again.';
+
 export class IdentityHandler {
   constructor(private readonly rt: Runtime) {}
 
@@ -78,6 +88,9 @@ export class IdentityHandler {
   async config(idStr: string, host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
     const id = Number(idStr);
     if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
+    // The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse rather
+    // than invent a host: the suite renders this sentence on Save.
+    if (host === '') return sendJson(res, { error: NO_ORIGIN }, 400);
 
     // Canonical SDK config — the idw role for every OAuth scenario (sdk.html §12c).
     const cfg: Record<string, unknown> = {
@@ -426,15 +439,25 @@ export class IdentityHandler {
     );
   }
 
-  /** The redirect URI recorded in the scenario's config file (used by the OIDC library). */
+  /**
+   * The redirect URI recorded in the scenario's config file (used by the OIDC library) — the SAME value
+   * the authorize URL carried, so the two legs of the exchange cannot diverge. An absent/empty record
+   * re-derives from THIS request's origin; it never substitutes a host (#574).
+   */
   private configRedirectUri(idStr: string, host: string): string {
     return str(this.rt.readConfig(idStr).oauth_redirect_uri) || this.redirectUri(host);
   }
 
   // ── input / config plumbing ──────────────────────────────────────────────
 
-  /** The registered redirect URI: http://{host}/callback (host = the serving origin). */
+  /**
+   * The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
+   * Never falls back to a hardcoded host (#574) — `127.0.0.1` and `localhost` are DIFFERENT origins for
+   * redirect matching and for browser storage alike, so a substituted default drops the developer on an
+   * origin whose localStorage never held the setup and whose URI the OAuth app never registered.
+   */
   private redirectUri(host: string): string {
+    if (host === '') throw new Error(NO_ORIGIN);
     return `http://${host}/callback`;
   }
 

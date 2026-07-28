@@ -70,7 +70,7 @@ async function main(): Promise<void> {
 
   // 4 + 5. serve — SINGLE process
   const port = Number(process.env.PORT ?? 8091);
-  const server = new Server(rt, frontend, VERSION, port);
+  const server = new Server(rt, frontend, VERSION);
   const http = createServer((req, res) => {
     server.handle(req, res).catch((e) => {
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
