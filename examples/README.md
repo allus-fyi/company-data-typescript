@@ -127,7 +127,9 @@ portal (service settings → Flows → Import) and publish it.
 
 ## Setting up a scenario (the portal)
 
-Every scenario's setup checklist names the exact portal steps; do them at **<https://portal.allus.fyi>**.
+Every scenario's setup checklist names the exact portal steps, and a table beneath it gives
+**the intended value for every control on each portal form it sends you to** — including the ones
+to leave alone. Do them at **<https://portal.allus.fyi>**.
 In short: register a **data client** (client_credentials) for the service (its whitelist auto-grants
 `/api/company-data/*`), create/reuse the **service** and download its **private key (PEM)** (it
 decrypts values, answers, and documents), then in the browser fill the scenario's setup panel and
@@ -213,4 +215,4 @@ checks the bundle's `contract.json` version against the backend (a mismatch refu
 | **`frontend checksum MISMATCH`** | The downloaded `dist.tar.gz` doesn't match `frontend.lock`'s `sha256`. Fix the `sha256` (from `shasum -a 256 dist.tar.gz` on the real release) or re-download. |
 | **`could not download the pinned frontend release`** | The release isn't published yet, or no network. If unpublished, seed the bundle into `.frontend/<tag>/` manually (build `example-test-suite`, `tar -xzf dist.tar.gz -C .frontend/<tag>`, `printf %s <sha> > .frontend/<tag>/.sha`). |
 | **Cannot find module `@allus-fyi/company-data`** | Build the SDK first (`npm run build` in the SDK repo root) — the example imports it through `dist/`. |
-| **`start_failed`** naming a missing connection / person (flow) | The connection id is wrong or the person isn't connected to the service — check the connection in the portal. |
+| **`start_failed`** naming a missing connection / person (flow) | The connection id is wrong or the person isn't connected to the service. The portal shows no per-service list of connected people — get the id by running the **Read connected people** scenario and opening its **Raw** view. |
