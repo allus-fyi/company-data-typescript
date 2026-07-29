@@ -112,7 +112,7 @@ bundle server) — not the SDK example.
 
 | Step | SDK calls |
 |------|-----------|
-| **Trigger** (`/start`) | `Client.fromConfig` → `identity()` (company party) → `connection()` (person party) → `triggerFlowRun(flowId, {connectionId, bindings})` |
+| **Trigger** (`/start`) | `Client.fromConfig` → `requestFields()` (resolve flow name + version → flow id) → `identity()` (company party) → `connections()` (resolve share code → person party) → `triggerFlowRun(flowId, {connectionId, bindings})` |
 | **Drive** (`/api/runs` poll, company turn) | `flowRun()` → `processFlowRun(flowRunId, fillNode)` — the `email` field is filled invalid once (`ValidationError` → ✗), then valid (→ ✓) |
 | **Wait** (person's turn) | `flowRun()` reports `awaiting_<person party>` → the run sits in `waiting_person`; the next poll resumes automatically |
 | **Complete** (run `completed`) | `flowRunAnswers()` (decrypted `{slug: value}`), plus `flowRunDocument()` for the `document` fixture |
@@ -222,4 +222,6 @@ checks the bundle's `contract.json` version against the backend (a mismatch refu
 | **`frontend checksum MISMATCH`** | The downloaded `dist.tar.gz` doesn't match `frontend.lock`'s `sha256`. Fix the `sha256` (from `shasum -a 256 dist.tar.gz` on the real release) or re-download. |
 | **`could not download the pinned frontend release`** | The release isn't published yet, or no network. If unpublished, seed the bundle into `.frontend/<tag>/` manually (build `example-test-suite`, `tar -xzf dist.tar.gz -C .frontend/<tag>`, `printf %s <sha> > .frontend/<tag>/.sha`). |
 | **Cannot find module `@allus-fyi/company-data`** | Build the SDK first (`npm run build` in the SDK repo root) — the example imports it through `dist/`. |
-| **`start_failed`** naming a missing connection / person (flow) | The connection id is wrong or the person isn't connected to the service. The portal shows no per-service list of connected people — get the id by running the **Read connected people** scenario and opening its **Raw** view. |
+| **`start_failed`** naming a missing flow (flow) | The flow name or published version doesn't match a flow on this service — check the spelling against the portal's flow list and the "Published vN" it shows next to it. |
+| **`start_failed`** naming more than one matching flow (flow) | Two flows on this service share the same name AND published version — rename one of them (the flow builder's name field) so the pair is unique, then try again. |
+| **`connection_error`** naming a missing connection (flow) | The share code is wrong, or the person isn't connected to this service yet. |

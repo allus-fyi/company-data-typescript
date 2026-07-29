@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 
-import { ApiError, Client, ConfigError, FlowRun, ValidationError } from '@allus-fyi/company-data';
+import { ApiError, Client, ConfigError, Connection, FlowRun, ValidationError } from '@allus-fyi/company-data';
 
 import { Runtime, addCall, type RunRecord } from '../runtime.js';
 import { sendFailure, sendJson, str } from '../http.js';
@@ -45,10 +45,12 @@ const INVALID_EMAIL = 'not-an-email';
  */
 const CALL_SERVICE_BUILD =
   'Client.fromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase';
+const CALL_REQUEST_FIELDS =
+  "Client.requestFields — resolves the flow name + published version (the only handle the portal ever shows for it) to its flow id";
 const CALL_IDENTITY =
   "Client.identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to";
-const CALL_CONNECTION =
-  "Client.connection — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to";
+const CALL_CONNECTIONS =
+  "Client.connections — resolves the person's own share code to the connection whose id the CUSTOMER party binds to";
 const CALL_TRIGGER =
   "Client.triggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version";
 const CALL_FLOW_RUN = 'Client.flowRun — re-read on every poll to see whose turn the run is on';
@@ -81,8 +83,10 @@ export class FlowHandler {
 
   /**
    * Write the browser's setup values to a canonical SDK config FILE (service role). The service PEM is
-   * written to config/keys/ and referenced by path; the demo-only run parameters (published flow id,
-   * connection id, fixture choice) go to the meta sidecar so the config file stays a pure SDK config.
+   * written to config/keys/ and referenced by path; the demo-only run parameters (flow name + published
+   * version, the person's share code, fixture choice) go to the meta sidecar so the config file stays a
+   * pure SDK config. Neither the flow id nor the connection id is ever collected here — {@link start}
+   * resolves both via the SDK instead of taking either as a raw database id.
    */
   async config(id: string, _host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
     if (!this.owns(id)) return sendJson(res, { error: 'not_found' }, 404);
@@ -100,8 +104,9 @@ export class FlowHandler {
 
     // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
     this.rt.writeConfigMeta(SCENARIO, {
-      flow_id: str(in_.flowId),
-      connection_id: str(in_.connectionId),
+      flow_name: str(in_.flowName),
+      flow_version: str(in_.flowVersion),
+      share_code: str(in_.shareCode),
       fixture: str(in_.fixture),
     });
 
@@ -111,10 +116,12 @@ export class FlowHandler {
   // ── POST /api/scenarios/{id}/start ──────────────────────────────────────
 
   /**
-   * Trigger the flow run. Build the service Client from the persisted config file, construct the
-   * bindings via the intended SDK surface (company → identity().company_user_id; customer →
-   * Connection.personId), call triggerFlowRun, and store the returned platform flowRunId in the demo
-   * run file. Returns {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
+   * Trigger the flow run. Build the service Client from the persisted config file, resolve the flow
+   * name + published version and the person's share code to the ids triggerFlowRun needs (neither is
+   * ever collected as a raw id), construct the bindings via the intended SDK surface (company →
+   * identity().company_user_id; customer → Connection.personId), call triggerFlowRun, and store the
+   * returned platform flowRunId in the demo run file. Returns {runId, action:{"type":"none"}} — the
+   * drive happens on the GET /api/runs poll.
    */
   async start(id: string, _host: string, res: ServerResponse): Promise<void> {
     if (!this.owns(id)) return sendJson(res, { error: 'not_found' }, 404);
@@ -122,17 +129,49 @@ export class FlowHandler {
     if (!this.rt.hasConfig(SCENARIO)) return sendJson(res, { error: 'not_configured' }, 409);
 
     const meta = this.rt.readConfigMeta(SCENARIO);
-    const flowId = str(meta.flow_id);
-    const connectionId = str(meta.connection_id);
-    if (flowId === '' || connectionId === '') {
-      return sendJson(res, { error: 'not_configured', message: 'flow id and connection id are required' }, 409);
+    const flowName = str(meta.flow_name).trim();
+    const flowVersionRaw = str(meta.flow_version).trim();
+    const shareCode = str(meta.share_code).trim();
+    if (flowName === '' || flowVersionRaw === '' || shareCode === '') {
+      return sendJson(
+        res,
+        { error: 'not_configured', message: 'flow name, published version and share code are required' },
+        409,
+      );
     }
+    if (!/^\d+$/.test(flowVersionRaw)) {
+      return sendFailure(res, `published version "${flowVersionRaw}" is not a number`, 'start_failed', 400);
+    }
+    const flowVersion = Number(flowVersionRaw);
 
     const calls: string[] = [];
     let flowRunId: string;
     try {
       calls.push(CALL_SERVICE_BUILD);
       const client = this.serviceClient();
+
+      // Resolve the flow name + published version to its flow id. The pair is not guaranteed unique
+      // (nothing enforces it), so this can return zero, one, or more than one candidate — only exactly
+      // one is safe to proceed on; anything else refuses rather than guess.
+      calls.push(CALL_REQUEST_FIELDS);
+      const candidates = await resolveFlowIdCandidates(client, flowName, flowVersion);
+      if (candidates.length === 0) {
+        return sendFailure(
+          res,
+          `no published flow named "${flowName}" at version ${flowVersion} — check the name and the "Published vN" the portal shows next to it`,
+          'start_failed',
+          404,
+        );
+      }
+      if (candidates.length > 1) {
+        return sendFailure(
+          res,
+          `more than one flow matches the name "${flowName}" at version ${flowVersion} — rename one of them in the portal (the flow builder's name field, next to "Published vN") so the pair is unique, then try again`,
+          'start_failed',
+          409,
+        );
+      }
+      const flowId = candidates[0];
 
       // The COMPANY party binds to this service's own company_user_id.
       calls.push(CALL_IDENTITY);
@@ -142,14 +181,24 @@ export class FlowHandler {
         return sendFailure(res, 'identity() returned no company_user_id', 'identity_error', 502);
       }
 
-      // The CUSTOMER party binds to the connected person's public personId.
-      calls.push(CALL_CONNECTION);
-      const connection = await client.connection(connectionId);
-      const personId = connection.personId;
-      if (personId === '') {
+      // Resolve the person's own share code to their connection — the CUSTOMER party binds to the
+      // connected person's public personId.
+      calls.push(CALL_CONNECTIONS);
+      const connection = await resolveConnection(client, shareCode);
+      if (connection === null) {
         return sendFailure(
           res,
-          `connection ${connectionId} has no personId (not found or not connected)`,
+          `no connection found for share code "${shareCode}" — is the person connected to this service?`,
+          'connection_error',
+          404,
+        );
+      }
+      const connectionId = connection.id;
+      const personId = connection.personId;
+      if (connectionId === '' || personId === '') {
+        return sendFailure(
+          res,
+          `connection for share code "${shareCode}" has no id/personId (not found or not connected)`,
           'connection_error',
           502,
         );
@@ -378,6 +427,45 @@ export class FlowHandler {
   private serviceClient(): Client {
     return Client.fromConfig(this.rt.configPathFor(SCENARIO));
   }
+}
+
+/**
+ * Resolve a flow's name + published version to its CANDIDATE flow ids. flow_id/flow_name/flow_version
+ * ride the additive `raw` object on the flow-tagged rows requestFields() returns — they are not typed
+ * properties of RequestField. Returns every DISTINCT flow id whose tagged fields match both name and
+ * version, deduplicated — nothing here guarantees the pair is unique, so the caller decides what to do
+ * with zero, one, or more than one candidate.
+ */
+async function resolveFlowIdCandidates(client: Client, flowName: string, flowVersion: number): Promise<string[]> {
+  const seen = new Set<string>();
+  for (const field of await client.requestFields()) {
+    const raw = field.raw;
+    const name = raw['flow_name'];
+    const version = raw['flow_version'];
+    if (name !== flowName || version === null || version === undefined || Number(version) !== flowVersion) {
+      continue;
+    }
+    const flowId = raw['flow_id'];
+    if (typeof flowId === 'string' && flowId !== '') {
+      seen.add(flowId);
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * Resolve a person's own share code to their Connection. connections() auto-pages the whole service — a
+ * demo has too few connections for that to matter, but it is the same call a real integrator would make
+ * to look a person up by the one identifier they can read off their own app.
+ */
+async function resolveConnection(client: Client, shareCode: string): Promise<Connection | null> {
+  const wanted = shareCode.toUpperCase();
+  for await (const connection of client.connections()) {
+    if (connection.shareCode !== null && connection.shareCode.toUpperCase() === wanted) {
+      return connection;
+    }
+  }
+  return null;
 }
 
 /**
