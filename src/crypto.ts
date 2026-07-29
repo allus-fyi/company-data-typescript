@@ -245,8 +245,38 @@ export function encryptForPublicKey(plaintext: string, publicKey: KeyObject): En
   };
 }
 
-/** Fetch a slot file endpoint → the inner `{"_enc":1,...}` wrapper. */
-export type BinaryFetch = (valueUrl: string) => Promise<EncWrapper | string> | EncWrapper | string;
+/**
+ * One response from a company-facing binary file endpoint, in the shape a {@link BinaryHandle} needs.
+ *
+ * #590 — the route has TWO 200 shapes and the company cannot predict which it will get, because the
+ * answer depends on whether the person's source field is private, which is theirs to change:
+ *
+ * - **encrypted** — `application/json`, `{"encrypted":true,"value":<wrapper>}`. The wrapper decrypts
+ *   to the binary ENVELOPE string, from which the file bytes are extracted.
+ * - **plaintext** — the file's own `Content-Type` (e.g. `image/jpeg`, `application/pdf`) and the body
+ *   IS the file bytes. Nothing to decrypt.
+ *
+ * The distinction is made on the response's `Content-Type`, never guessed from the body: a plaintext
+ * answer's first byte is whatever the file starts with, and a PDF or a JPEG that happened to begin
+ * with a brace would be indistinguishable from a wrapper by sniffing.
+ *
+ * `contentSha256` is the platform's `X-Allus-Content-Sha256` — the sha256 of exactly these bytes,
+ * present on both shapes — so a consumer can record what it received and later prove its archived
+ * copy has not drifted.
+ */
+export interface BinaryFetchResult {
+  /** `true` for the JSON-wrapper shape, `false` when the body already IS the file. */
+  encrypted: boolean;
+  /** The `{"_enc":1,…}` wrapper (encrypted shape). */
+  wrapper?: EncWrapper | string | null;
+  /** The file bytes themselves (plaintext shape). */
+  bytes?: Buffer | null;
+  contentType?: string | null;
+  contentSha256?: string | null;
+}
+
+/** Fetch a slot file endpoint → the classified response (which shape arrived, plus its digest). */
+export type BinaryFetch = (valueUrl: string) => Promise<BinaryFetchResult> | BinaryFetchResult;
 /** Decrypt a ciphertext wrapper → the envelope string (closes over the service key). */
 export type DecryptWrapper = (wrapper: EncWrapper | string) => string;
 
@@ -256,26 +286,41 @@ const DATA_URI_KEYS = ['full', 'file'] as const;
  * Lazy handle for a binary (photo/document) value.
  *
  * A binary answer is stored server-side as a file, exposed in the hardened API as
- * a slot-keyed `value_url` (never the source field). On `.bytes()` / `.save()` the
- * handle GETs that URL, receives the `{"_enc":1,...}` wrapper, runs the same
- * decrypt as text → a JSON envelope STRING (photo: `{"full":"data:...","thumb":...}`;
- * document: `{"file":"data:...",...}`) — NOT raw bytes — then parses the envelope
- * and base64-decodes the primary data-URI payload (`full` for photos, `file` for
- * documents) into the file bytes.
+ * a slot-keyed `value_url` (never the source field). `.bytes()` and `.save()` GET
+ * that URL and return the FILE BYTES either way — the caller never has to know
+ * which of the two response shapes arrived.
+ *
+ * #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE
+ * COMPANY'S. Whether the person's source field is private decides it, they can change it at
+ * any time, and nothing in the API announces it in advance:
+ *
+ *   - **private source** → `application/json` `{"encrypted":true,"value":<wrapper>}`. The wrapper
+ *     decrypts to a JSON envelope STRING (photo: `{"full":"data:...","thumb":...}`; document:
+ *     `{"file":"data:...",...}`) — NOT raw bytes — whose primary data-URI payload (`full` for
+ *     photos, `file` for documents) base64-decodes to the file.
+ *   - **plaintext source** → the file's own `Content-Type` and the body IS the file. There is
+ *     nothing to decrypt, and a handle built this way needs no service key at all.
+ *
+ * Photos resolve to the `full` representation. There is no variant selection: one slot has one byte
+ * sequence and therefore one digest.
  *
  * The fetch + decrypt are supplied by the client as plain callables (config-only
  * key handling — no key is ever passed to this handle):
- *   - `valueUrl` + `fetch` — `fetch(valueUrl)` returns the encrypted wrapper (the
- *     client passes a callback that GETs the slot file endpoint and unwraps the
- *     `{"encrypted": true, "value": <wrapper>}` envelope to the inner wrapper).
+ *   - `valueUrl` + `fetch` — `fetch(valueUrl)` returns a {@link BinaryFetchResult} saying which
+ *     shape arrived (the client classifies it on the response's `Content-Type`; the body is never
+ *     sniffed).
  *   - `decrypt` — `decrypt(wrapper)` returns the decrypted envelope string (a
- *     closure over the loaded service private key).
+ *     closure over the loaded service private key). Only ever called for the encrypted shape.
  *
  * For the shared crypto test vector the decrypted envelope is already in hand, so
  * a handle can also be built directly from `envelopeJson` (no fetch).
  */
 export class BinaryHandle {
   private envelopeJson: string | null;
+  /** Plaintext file bytes, once a plaintext-shaped response has been fetched. */
+  private plainBytes: Buffer | null = null;
+  private _contentType: string | null = null;
+  private _contentSha256: string | null = null;
   private readonly _valueUrl: string | null;
   private readonly fetch: BinaryFetch | null;
   private readonly decryptWrapper: DecryptWrapper | null;
@@ -297,21 +342,64 @@ export class BinaryHandle {
     return this._valueUrl;
   }
 
+  /**
+   * The platform's `X-Allus-Content-Sha256` for the bytes this handle fetched — the sha256 of
+   * exactly what {@link bytes} returns, so a consumer can record it and later show that its archived
+   * copy has not drifted. `null` until something has been fetched, and on a handle built from an
+   * envelope that was never fetched through this class.
+   *
+   * It is the platform's word, not a signature: it proves agreement with the platform's record, not
+   * anything to a third party who doubts that record.
+   */
+  get contentSha256(): string | null {
+    return this._contentSha256;
+  }
+
+  /** The response `Content-Type` the bytes arrived with, once fetched. */
+  get contentType(): string | null {
+    return this._contentType;
+  }
+
+  /**
+   * Fetch once and record which shape arrived. Idempotent: the result is cached on the handle so
+   * repeated `.bytes()`/`.save()` calls do not re-fetch, and so a plaintext answer's digest survives
+   * for {@link contentSha256}.
+   */
+  private async fetchOnce(): Promise<void> {
+    if (this.plainBytes !== null || this.envelopeJson !== null) {
+      return;
+    }
+    if (this.fetch === null || this._valueUrl === null) {
+      throw new DecryptError(
+        'BinaryHandle has no envelope and no fetch wiring ' +
+          '(build it with envelopeJson, or valueUrl + fetch + decrypt)',
+      );
+    }
+    const result = await this.fetch(this._valueUrl);
+    this._contentType = result.contentType ?? null;
+    this._contentSha256 = result.contentSha256 ?? null;
+
+    if (!result.encrypted) {
+      // A plaintext answer needs no service key. Requiring `decrypt` here would make a handle
+      // built without one fail on exactly the answers that do not need it.
+      this.plainBytes = result.bytes ?? Buffer.alloc(0);
+      return;
+    }
+    if (this.decryptWrapper === null) {
+      throw new DecryptError('binary answer is encrypted but this handle has no decrypt wiring');
+    }
+    this.envelopeJson = this.decryptWrapper(result.wrapper ?? '');
+  }
+
   private async resolveEnvelope(): Promise<string> {
     if (this.envelopeJson !== null) {
       return this.envelopeJson;
     }
-    if (this.fetch === null || this.decryptWrapper === null || this._valueUrl === null) {
-      throw new DecryptError(
-        'BinaryHandle has no envelope and no fetch/decrypt wiring ' +
-          '(build it with envelopeJson, or valueUrl + fetch + decrypt)',
-      );
+    await this.fetchOnce();
+    if (this.envelopeJson === null) {
+      throw new DecryptError('binary answer arrived as plaintext bytes; use bytes()/save()');
     }
-    const wrapper = await this.fetch(this._valueUrl);
-    const envelopeJson = this.decryptWrapper(wrapper);
-    // Cache so repeated .bytes()/.save() don't re-fetch.
-    this.envelopeJson = envelopeJson;
-    return envelopeJson;
+    return this.envelopeJson;
   }
 
   /**
@@ -359,6 +447,15 @@ export class BinaryHandle {
 
   /** Fetch (if needed), decrypt, and return the decoded primary file bytes. */
   async bytes(): Promise<Buffer> {
+    if (this.plainBytes !== null) {
+      return this.plainBytes;
+    }
+    if (this.envelopeJson === null) {
+      await this.fetchOnce();
+      if (this.plainBytes !== null) {
+        return this.plainBytes;
+      }
+    }
     return BinaryHandle.parseEnvelopeBytes(await this.resolveEnvelope());
   }
 

@@ -71,21 +71,41 @@ A lazy handle for a binary value. No network or decryption happens at constructi
 ```ts
 class BinaryHandle {
   get valueUrl(): string | null;        // the opaque slot-keyed file URL (read-only)
-  bytes(): Promise<Buffer>;             // fetch (if needed) → decrypt → decoded primary file bytes
+  get contentType(): string | null;     // the Content-Type the bytes arrived with (after a fetch)
+  get contentSha256(): string | null;   // the X-Allus-Content-Sha256 digest of those bytes
+  bytes(): Promise<Buffer>;             // fetch (if needed) → the primary file bytes
   save(path: string): Promise<number>;  // write bytes() to path; resolves to bytes written
   static parseEnvelopeBytes(envelopeJson: string): Buffer;  // envelope string → file bytes
 }
 ```
 
-On first `.bytes()`/`.save()`:
+The file endpoint has **two 200 shapes**, decided by whether the person's source field
+is private — the company cannot predict or control which arrives. On first
+`.bytes()`/`.save()` the handle GETs the slot-keyed file endpoint and classifies the
+response on its `Content-Type` (never by sniffing the body):
 
-1. GET the slot-keyed file endpoint → the API serves `{"encrypted": true, "value": <wrapper>}`.
-2. Decrypt the inner `{"_enc":1,…}` wrapper with the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos, `{"file": "data:…", …}` for documents).
-3. Base64-decode the primary data URI (`full` for photos, `file` for documents) → a `Buffer`. Cached on the handle (repeated calls don't re-fetch).
+* **`application/json`, or no `Content-Type` at all** → the encrypted shape,
+  `{"encrypted": true, "value": <wrapper>}`. Decrypt the inner `{"_enc":1,…}` wrapper with
+  the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos,
+  `{"file": "data:…", …}` for documents), then base64-decode the primary data URI (`full`
+  for photos, `file` for documents) → a `Buffer`.
+* **any other `Content-Type`** (`image/jpeg`, `application/pdf`, …) → the plaintext shape:
+  the body already IS the file. Nothing is decrypted, and a handle built without decrypt
+  wiring still works.
+
+A missing `Content-Type` deliberately falls through to the JSON path: mistaking a wrapper
+for file bytes writes ciphertext to disk as if it were the document and nothing complains,
+while mistaking bytes for a wrapper fails loudly at the parse.
+
+Either way the result is cached on the handle (repeated calls don't re-fetch), and
+`contentSha256` exposes the `X-Allus-Content-Sha256` digest of exactly the bytes returned.
+There is no variant selection: one slot has one byte sequence and one digest.
 
 `.save()` is crash-safe (temp file → fsync → atomic rename — never a truncated
 output). An unanswered binary slot yields an empty handle; calling `.bytes()` on it
-throws `DecryptError`.
+throws `DecryptError`. A frozen answer whose 90-day retention has elapsed answers **410**
+`company_data.file_expired` — an `ApiError` whose `details` carry `content_sha256` and
+`expired_at`.
 
 ## `Change`
 

@@ -451,17 +451,38 @@ you call `.bytes()` or `.save()`:
 ```ts
 const handle = conn.values['passport_scan'].value as BinaryHandle;  // no network yet
 
-const data = await handle.bytes();                  // GET the slot file → decrypt → Buffer
+const data = await handle.bytes();                  // GET the slot file → the file bytes
 const n    = await handle.save('/tmp/passport.jpg'); // same, written to disk; returns bytes written
 console.log(handle.valueUrl);                         // the opaque slot-keyed URL it fetches from
+console.log(handle.contentType, handle.contentSha256); // what arrived, and its digest
 ```
 
-`.bytes()` GETs the slot-keyed file endpoint, unwraps the API's
-`{"encrypted": true, "value": <wrapper>}` envelope, decrypts with your service key,
-parses the inner JSON envelope (`{"full": "data:…"}` for photos, `{"file": "data:…"}`
-for documents) and base64-decodes the data URI into a `Buffer`. The result is cached
-on the handle, so repeated calls don't re-fetch. `.save()` is crash-safe (temp file →
-fsync → atomic rename).
+**The endpoint has two 200 shapes, and which one you get is the person's choice, not
+yours** — it depends on whether their source field is private, they can change it at
+any time, and nothing announces it in advance:
+
+* **private source** → `application/json` `{"encrypted": true, "value": <wrapper>}`. The
+  wrapper is decrypted with your service key into a JSON file-envelope
+  (`{"full": "data:…"}` for photos, `{"file": "data:…"}` for documents) whose data URI
+  base64-decodes to the file.
+* **plaintext source** → the file's own `Content-Type` (`image/jpeg`, `application/pdf`, …)
+  and the body already IS the file. Nothing is decrypted, and no service key is needed.
+
+`.bytes()`/`.save()` hide the difference and give you the file bytes either way; the
+handle tells the two apart on the response `Content-Type` and never by sniffing the
+body. There is no variant selection — one slot has one byte sequence and therefore one
+digest. Every 200 carries `X-Allus-Content-Sha256`, the sha256 of exactly the bytes
+returned, exposed as `handle.contentSha256` (and `handle.contentType`) after the first
+fetch, so you can record what you received and later show your archived copy has not
+drifted. The result is cached on the handle, so repeated calls don't re-fetch.
+`.save()` is crash-safe (temp file → fsync → atomic rename).
+
+A frozen (share-once) answer is retained for 90 days. After that the endpoint answers
+**410** with `error_key: company_data.file_expired`, surfacing as an `ApiError` whose
+`details` carry the `content_sha256` the file had and its `expired_at` — so your copy
+is now the only one, and you can still prove what it is. The values map may also carry
+`content_sha256` / `expired` / `expired_at` on a binary slot ahead of the fetch; those
+ride verbatim on `Value.raw` (and on `Change.raw` for a `field_deleted` event).
 
 ### `Change { id, event, personId, slug?, value?, live?, at }`
 
@@ -891,9 +912,15 @@ the payload (the 16-byte tag is the last 16 bytes of `d`). **The platform only e
 holds ciphertext — it never sees your plaintext.**
 
 **Binary fetch.** A binary value is a lazy `BinaryHandle` over a slot-keyed
-`value_url`. On `.bytes()`/`.save()` it GETs that file endpoint, unwraps the
-`{"encrypted":true,"value":<wrapper>}` envelope, runs the same service-key decrypt
-to a JSON file-envelope, and base64-decodes its data URI to the file bytes.
+`value_url`. On `.bytes()`/`.save()` it GETs that file endpoint and returns the file
+bytes. The endpoint answers in one of two shapes depending on whether the person's
+source field is private: a `{"encrypted":true,"value":<wrapper>}` JSON envelope that
+the same service-key decrypt turns into a JSON file-envelope whose data URI
+base64-decodes to the file, or — for a plaintext source — the file's own
+`Content-Type` and the bytes themselves. The SDK classifies on `Content-Type` alone
+and never sniffs the body: mistaking a wrapper for file bytes would silently write
+ciphertext to disk as if it were the document, while mistaking bytes for a wrapper
+fails loudly at the parse, so an absent `Content-Type` is treated as the JSON shape.
 (Slot-keyed, never source-field-keyed.)
 
 **XML, safely.** When `format: "xml"`, responses (and webhook bodies) are parsed by

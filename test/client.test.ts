@@ -23,16 +23,42 @@ const vector = loadVector();
 
 class FakeResponse implements HttpResponse {
   readonly status: number;
-  private readonly bodyText: string;
-  constructor(status: number, jsonBody?: unknown, text?: string) {
+  private readonly bodyBytes: Buffer;
+  private readonly hdrs: Record<string, string>;
+  constructor(status: number, jsonBody?: unknown, body?: string | Buffer, headers: Record<string, string> = {}) {
     this.status = status;
-    this.bodyText = text ?? (jsonBody !== undefined ? JSON.stringify(jsonBody) : '');
+    this.bodyBytes = Buffer.isBuffer(body)
+      ? body
+      : Buffer.from(body ?? (jsonBody !== undefined ? JSON.stringify(jsonBody) : ''), 'utf8');
+    this.hdrs = headers;
+  }
+  /**
+   * #590: a non-JSON 200 — the raw file bytes under the file's own Content-Type, which is what the
+   * slot endpoint serves when the person's source field is NOT private.
+   */
+  static bytes(status: number, body: Buffer, headers: Record<string, string>): FakeResponse {
+    return new FakeResponse(status, undefined, body, headers);
   }
   async text(): Promise<string> {
-    return this.bodyText;
+    return this.bodyBytes.toString('utf8');
+  }
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    // Binary-safe: #590's plaintext shape carries bytes a utf-8 round-trip would mangle, so the
+    // double must offer the same accessor the real Fetch Response does.
+    const copy = Buffer.from(this.bodyBytes);
+    return copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength) as ArrayBuffer;
   }
   get headers(): { get(name: string): string | null } {
-    return { get: () => null };
+    const hdrs = this.hdrs;
+    return {
+      get(name: string): string | null {
+        const target = name.toLowerCase();
+        for (const [k, v] of Object.entries(hdrs)) {
+          if (k.toLowerCase() === target) return v;
+        }
+        return null;
+      },
+    };
   }
 }
 
@@ -273,6 +299,128 @@ test('binary handle fetches slot and decrypts', async () => {
     const data = await handle.bytes();
     assert.ok(transport.gets.some((g) => g.url.endsWith('/slots/sf-9/file')));
     assert.equal(createHash('sha256').update(data).digest('hex'), vector.binary.inner_full_sha256);
+  });
+});
+
+/**
+ * #590 — the SAME slot URL serves raw file bytes when the person's source field is NOT private.
+ * The handle must return the file either way, without the caller knowing which shape arrived, and
+ * must not try to decrypt bytes that were never encrypted.
+ */
+test('binary handle serves plaintext bytes', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const page = {
+      total: 1,
+      items: [
+        {
+          connection_id: 'csc-1',
+          user_id: 'person-1',
+          display_name: 'Anna',
+          values: { logo: { value_url: 'https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file', live: true } },
+        },
+      ],
+    };
+    const bytes = Buffer.from('ffd8ffe06e6f742d7265616c6c792d612d6a706567', 'hex');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
+      if (url.endsWith('/connections')) return new FakeResponse(200, page);
+      if (url.endsWith('/slots/sf-9/file')) {
+        return FakeResponse.bytes(200, bytes, { 'Content-Type': 'image/jpeg', 'X-Allus-Content-Sha256': digest });
+      }
+      throw new Error('unexpected GET ' + url);
+    });
+
+    const conns: Connection[] = [];
+    for await (const c of client.connections()) conns.push(c);
+    const handle = conns[0].values.logo.value as BinaryHandle;
+    assert.ok(handle instanceof BinaryHandle);
+
+    assert.deepEqual(await handle.bytes(), bytes);
+    assert.equal(handle.contentType, 'image/jpeg');
+    assert.equal(handle.contentSha256, digest);
+  });
+});
+
+/**
+ * #590 — the binary fetch classifies the response itself, so it must parse the structured shape the
+ * way every other endpoint is parsed. An XML-configured client speaks XML everywhere else; a
+ * hard-coded JSON parse here would lose XML support on exactly this one endpoint.
+ *
+ * Driven through `flowRunDocument`, which reaches the same fetch+decrypt path with a single GET.
+ */
+test('binary handle parses the encrypted shape as XML for an xml-format client', async () => {
+  await withTmp(async (dir) => {
+    const pem = join(dir, 'service-key.pem');
+    writeFileSync(pem, vector.encrypted_private_key_pem, 'ascii');
+    const config = new Config({
+      apiUrl: 'https://api.allme.fyi',
+      clientId: 'svc_abc',
+      clientSecret: 'topsecret',
+      servicePrivateKey: pem,
+      keyPassphrase: vector.passphrase,
+      cacheDir: join(dir, 'cache'),
+      format: 'xml',
+    });
+    const w = vector.binary.wrapper;
+    const xml =
+      '<response><encrypted>true</encrypted>' +
+      `<value><_enc>1</_enc><k>${w.k}</k><iv>${w.iv}</iv><d>${w.d}</d></value>` +
+      '</response>';
+    const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/flow-runs/run-1/document/file')) {
+        return new FakeResponse(200, undefined, xml, { 'Content-Type': 'application/xml' });
+      }
+      throw new Error('unexpected GET ' + url);
+    });
+
+    const data = await client.flowRunDocument('run-1');
+    assert.equal(createHash('sha256').update(data).digest('hex'), vector.binary.inner_full_sha256);
+  });
+});
+
+/** #590 — a 410 file_expired surfaces the digest and the expiry date through ApiError.details. */
+test('binary handle expired answer carries digest', async () => {
+  await withTmp(async (dir) => {
+    const config = makeConfig(dir);
+    const page = {
+      total: 1,
+      items: [
+        {
+          connection_id: 'csc-1',
+          user_id: 'person-1',
+          display_name: 'Anna',
+          values: { logo: { value_url: 'https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file', live: false } },
+        },
+      ],
+    };
+    const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
+      if (url.endsWith('/connections')) return new FakeResponse(200, page);
+      return new FakeResponse(410, {
+        error: 'This file has expired',
+        error_key: 'company_data.file_expired',
+        content_sha256: 'abc123',
+        expired_at: '2026-07-01T00:00:00Z',
+      });
+    });
+
+    const conns: Connection[] = [];
+    for await (const c of client.connections()) conns.push(c);
+    const handle = conns[0].values.logo.value as BinaryHandle;
+
+    await assert.rejects(
+      () => handle.bytes(),
+      (err: unknown) => {
+        assert.ok(err instanceof ApiError);
+        assert.equal(err.status, 410);
+        assert.equal(err.errorKey, 'company_data.file_expired');
+        assert.equal(err.details['content_sha256'], 'abc123');
+        assert.equal(err.details['expired_at'], '2026-07-01T00:00:00Z');
+        return true;
+      },
+    );
   });
 });
 

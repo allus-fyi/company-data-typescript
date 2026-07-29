@@ -29,9 +29,11 @@
  *   - **Slug catalog** — `requestFields()` is fetched once and cached; its slug→type
  *     map types every value (so `address` parses to an object, `photo` becomes a
  *     lazy binary handle, etc.).
- *   - **Binary** — a value's `BinaryHandle.bytes()` GETs the slot file endpoint,
- *     unwraps the API's `{"encrypted":true,"value":<wrapper>}` envelope, and runs
- *     the same service-key decrypt → the file bytes.
+ *   - **Binary** — a value's `BinaryHandle.bytes()` GETs the slot file endpoint and returns the
+ *     file bytes. #590: that endpoint answers in one of two shapes depending on whether the
+ *     person's source field is private — a `{"encrypted":true,"value":<wrapper>}` JSON envelope the
+ *     service key decrypts, or the raw file bytes under the file's own Content-Type — and the
+ *     handle hides the difference.
  *   - **Changes feed** — `processChanges` delegates to the {@link Pump}, injecting a
  *     `fetchChanges` closure (`GET /changes?limit=`, returning the raw ciphertext
  *     events) and a `decrypt` closure that builds a typed {@link Change}.
@@ -47,6 +49,7 @@ import {
   encryptForPublicKey,
   loadPrivateKey,
   loadPublicKey,
+  type BinaryFetchResult,
   type EncWrapper,
 } from './crypto.js';
 import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError } from './errors.js';
@@ -178,18 +181,47 @@ export class Client {
   private decryptValue = (wrapper: EncWrapper | string): string => cryptoDecrypt(wrapper, this.privateKey);
 
   /**
-   * Fetch a slot file endpoint and unwrap its `{"encrypted":true,"value":...}` envelope.
+   * Fetch a company-facing binary file endpoint and classify its response.
    *
-   * Returns the inner `{"_enc":1,...}` wrapper, which the {@link BinaryHandle} then
-   * decrypts with the same service key.
+   * #590 — the endpoint has TWO 200 shapes and which one arrives is not the company's to predict:
+   * a person whose source field is PRIVATE yields `application/json`
+   * `{"encrypted":true,"value":<wrapper>}`, a person whose field is not yields the file's own
+   * Content-Type and the bytes themselves. The decision is made on `Content-Type` and never by
+   * sniffing the body — a PDF or an image that happened to start with a brace would be
+   * indistinguishable from a wrapper.
+   *
+   * A 410 `company_data.file_expired` (the answer's 90-day retention has elapsed) surfaces as an
+   * {@link ApiError} whose `details` carry `content_sha256` and `expired_at`.
    */
-  private binaryFetch = async (valueUrl: string): Promise<EncWrapper | string> => {
-    const body = await this.http.get(valueUrl);
-    if (body !== null && typeof body === 'object' && !Array.isArray(body) && 'value' in body) {
-      return (body as Record<string, unknown>)['value'] as EncWrapper | string;
+  private binaryFetch = async (valueUrl: string): Promise<BinaryFetchResult> => {
+    const resp = await this.http.getResponse(valueUrl);
+    const contentType = resp.header('Content-Type') ?? '';
+    const digest = resp.header('X-Allus-Content-Sha256');
+
+    // Plaintext is claimed ONLY on a Content-Type that positively says so. A missing or empty
+    // header falls through to the JSON path — the historical shape — because the two failure modes
+    // are not symmetrical: mistaking a wrapper for file bytes writes the ciphertext envelope to
+    // disk as if it were the document and nothing complains, while mistaking bytes for a wrapper
+    // fails loudly at the parse. Guess towards the loud one.
+    const lowered = contentType.toLowerCase();
+    const isJsonish = contentType === '' || lowered.includes('json') || lowered.includes('xml');
+    if (!isJsonish) {
+      return { encrypted: false, bytes: resp.body, contentType, contentSha256: digest };
     }
-    // Defensive: some shapes might return the wrapper directly.
-    return body as EncWrapper | string;
+
+    // Parsed through the client's OWN parser, not a hard-coded JSON.parse: an XML-configured client
+    // speaks XML on every other endpoint and must not silently lose it on this one.
+    const body = this.http.parseBody(resp, this.http.wantsXml);
+    const wrapper =
+      body !== null && typeof body === 'object' && !Array.isArray(body) && 'value' in body
+        ? ((body as Record<string, unknown>)['value'] as EncWrapper | string)
+        : (body as EncWrapper | string);
+    return {
+      encrypted: true,
+      wrapper,
+      contentType: contentType !== '' ? contentType : null,
+      contentSha256: digest,
+    };
   };
 
   /** Resolve a request slug to its field type (loads the catalog once). */

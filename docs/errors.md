@@ -28,15 +28,29 @@ chain is restored in the constructor).
 
 ```ts
 class ApiError extends AllusError {
-  status: number;             // the HTTP status
-  errorKey: string | null;    // the platform error_key, when the body provided one
-  apiMessage: string | null;  // a human-readable message
+  status: number;                       // the HTTP status
+  errorKey: string | null;              // the platform error_key, when the body provided one
+  apiMessage: string | null;            // a human-readable message
+  details: Record<string, unknown>;     // the error body's remaining fields, verbatim
 }
 ```
 
 `err.message` is formatted as `"HTTP <status> (<errorKey>): <apiMessage>"`. A
 transport failure (no HTTP response — e.g. a connection error) surfaces as
 `new ApiError(0, null, …)`.
+
+`details` carries everything the error body sent BESIDE the key and the message, so a
+response with actionable data is readable without a bespoke error type. The current
+example is the expired binary answer:
+
+```ts
+catch (e) {
+  if (e instanceof ApiError && e.errorKey === 'company_data.file_expired') {
+    // the frozen answer's 90-day retention elapsed — your copy is now the only one
+    record(e.details['content_sha256'], e.details['expired_at']);
+  }
+}
+```
 
 ## `RateLimitError`
 
@@ -62,7 +76,7 @@ If you catch it, wait `err.retryAfter` (or a default) before retrying.
 | `Client.fromConfig` / `fromEnv` | `ConfigError` |
 | Token / any call (auth) | `AuthError` |
 | `connections`, `connection`, `requestFields`, `logs`, pump drains | `ApiError`, `RateLimitError` |
-| Value access / `BinaryHandle.bytes()` / pump delivery | `DecryptError` |
+| Value access / `BinaryHandle.bytes()` / pump delivery | `DecryptError`; `BinaryHandle.bytes()` also `ApiError` (a 410 `company_data.file_expired` on an expired frozen answer) |
 | `verifyWebhook` / `parseWebhook` / `handleWebhook` | `WebhookError` (`verifyWebhook` returns `false` rather than throwing on a bad signature) |
 
 ## Example

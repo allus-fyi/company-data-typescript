@@ -55,6 +55,22 @@ export interface HttpResponse {
 }
 
 /**
+ * A materialized 2xx response: the status, the raw body bytes, and the headers.
+ *
+ * #590: the company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
+ * encrypted answer, raw file bytes for a plaintext one) that are told apart by `Content-Type`, and
+ * both carry an `X-Allus-Content-Sha256` digest header — so the caller needs the headers AND the
+ * unparsed body. The body is read eagerly (a Fetch `Response` streams its body exactly once), so a
+ * `RawResponse` stays readable after the transport call has returned.
+ */
+export interface RawResponse {
+  readonly status: number;
+  readonly body: Buffer;
+  /** Case-insensitive header lookup, `null` when absent. */
+  header(name: string): string | null;
+}
+
+/**
  * A request body carried by a write verb: either a JSON object (serialized by the
  * transport with `Content-Type: application/json`) or raw bytes with an explicit
  * Content-Type.
@@ -265,6 +281,18 @@ export class HttpClient {
     return this.request('GET', path, { rawResponse: true }) as Promise<Buffer>;
   }
 
+  /**
+   * GET `path` → the whole 2xx response: status, headers AND raw body, with no parse.
+   *
+   * #590: the company-facing binary file endpoints have two 200 shapes told apart by
+   * `Content-Type`, and both carry an `X-Allus-Content-Sha256` digest header. Neither {@link get}
+   * (which parses) nor {@link getRaw} (which drops the headers) can express that, so this hands the
+   * caller the response itself. Auth/refresh/retry and error mapping are identical.
+   */
+  async getResponse(path: string): Promise<RawResponse> {
+    return this.request('GET', path, { wantResponse: true }) as Promise<RawResponse>;
+  }
+
   /** POST `path` with a JSON body or raw bytes → parsed body. */
   async post(
     path: string,
@@ -302,10 +330,12 @@ export class HttpClient {
       contentType?: string;
       /** When true, a 2xx response returns raw bytes (no JSON/XML parse) — see {@link getRaw}. */
       rawResponse?: boolean;
+      /** When true, a 2xx response returns the whole {@link RawResponse} — see {@link getResponse}. */
+      wantResponse?: boolean;
     } = {},
   ): Promise<unknown> {
     const url = this.url(path);
-    const wantsXml = this.config.format === 'xml';
+    const wantsXml = this.wantsXml;
     const accept = wantsXml ? 'application/xml' : 'application/json';
     const body: RequestBody | undefined =
       opts.raw !== undefined
@@ -333,7 +363,13 @@ export class HttpClient {
       const status = resp.status;
 
       if (status >= 200 && status < 300) {
-        return opts.rawResponse ? this.readRawBody(resp) : this.parseBody(resp, wantsXml);
+        if (opts.wantResponse) {
+          return this.materialize(resp);
+        }
+        if (opts.rawResponse) {
+          return this.readRawBody(resp);
+        }
+        return this.parseBody(await this.materialize(resp), wantsXml);
       }
 
       if (status === 401) {
@@ -369,8 +405,8 @@ export class HttpClient {
       }
 
       // Any other non-2xx → ApiError with the body's error_key.
-      const { errorKey, message } = await extractError(resp);
-      throw new ApiError(status, errorKey, message);
+      const { errorKey, message, details } = await extractError(resp);
+      throw new ApiError(status, errorKey, message, details);
     }
   }
 
@@ -381,6 +417,12 @@ export class HttpClient {
     return this.apiUrl + (path.startsWith('/') ? '' : '/') + path;
   }
 
+  /** Read the body once and pair it with the headers → a {@link RawResponse} (see {@link getResponse}). */
+  private async materialize(resp: HttpResponse): Promise<RawResponse> {
+    const body = await this.readRawBody(resp);
+    return { status: resp.status, body, header: (name) => resp.headers.get(name) };
+  }
+
   /** Binary-safe raw-body read for {@link getRaw}: prefers `arrayBuffer()`, falls back to `text()`. */
   private async readRawBody(resp: HttpResponse): Promise<Buffer> {
     if (typeof resp.arrayBuffer === 'function') {
@@ -389,9 +431,17 @@ export class HttpClient {
     return Buffer.from(await resp.text(), 'utf-8');
   }
 
-  private async parseBody(resp: HttpResponse, wantsXml: boolean): Promise<unknown> {
-    const text = await resp.text();
-    if (text === null || text.trim() === '') {
+  /**
+   * Parse a 2xx body per the configured wire format: the XXE-safe XML parser when the client is
+   * configured for `xml`, JSON otherwise. An empty body parses to `{}`.
+   *
+   * Public since #590: {@link Client}'s binary fetch classifies a {@link getResponse} itself and
+   * then has to parse the structured shape the way every OTHER endpoint is parsed — a hard-coded
+   * JSON parse here would silently lose XML support on exactly one endpoint.
+   */
+  parseBody(resp: RawResponse, wantsXml: boolean): unknown {
+    const text = resp.body.toString('utf8');
+    if (text.trim() === '') {
       return {};
     }
     if (wantsXml) {
@@ -407,17 +457,30 @@ export class HttpClient {
       throw new ApiError(resp.status, null, `response was not valid JSON: ${(exc as Error).message}`);
     }
   }
+
+  /**
+   * `true` when this client is configured for the XML wire format.
+   *
+   * #590: the binary file fetch parses the structured shape itself, and must do it the way the rest
+   * of this client does — an XML-configured client would otherwise silently lose XML support on
+   * exactly one endpoint.
+   */
+  get wantsXml(): boolean {
+    return this.config.format === 'xml';
+  }
 }
 
 // ── module-level helpers ─────────────────────────────────────────────────────
 
-/** Pull `error_key` + a message out of a non-2xx body (JSON or XML). */
-async function extractError(resp: HttpResponse): Promise<{ errorKey: string | null; message: string | null }> {
+/** Pull `error_key`, a message and the body's remaining fields out of a non-2xx body (JSON or XML). */
+async function extractError(
+  resp: HttpResponse,
+): Promise<{ errorKey: string | null; message: string | null; details: Record<string, unknown> }> {
   let text: string;
   try {
     text = await resp.text();
   } catch {
-    return { errorKey: null, message: null };
+    return { errorKey: null, message: null, details: {} };
   }
   let body: unknown = null;
   const trimmed = text.trim();
@@ -425,25 +488,33 @@ async function extractError(resp: HttpResponse): Promise<{ errorKey: string | nu
     try {
       body = parseXml(trimmed);
     } catch {
-      return { errorKey: null, message: trimmed || null };
+      return { errorKey: null, message: trimmed || null, details: {} };
     }
   } else {
     try {
       body = JSON.parse(trimmed);
     } catch {
-      return { errorKey: null, message: trimmed || null };
+      return { errorKey: null, message: trimmed || null, details: {} };
     }
   }
   if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
     const rec = body as Record<string, unknown>;
     const errorKey = rec['error_key'];
     const message = rec['error'] ?? rec['message'];
+    // #590: everything BESIDE the key and the message travels on as `details`, so a body that
+    // carries actionable data (a 410 file_expired's content_sha256 + expired_at) is readable
+    // without a bespoke error type per response.
+    const details = { ...rec };
+    delete details['error_key'];
+    delete details['error'];
+    delete details['message'];
     return {
       errorKey: errorKey != null ? String(errorKey) : null,
       message: message != null ? String(message) : null,
+      details,
     };
   }
-  return { errorKey: null, message: null };
+  return { errorKey: null, message: null, details: {} };
 }
 
 /** Parse the `Retry-After` header (delta-seconds form) → number of seconds or null. */

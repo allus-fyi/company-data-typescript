@@ -24,7 +24,7 @@ import {
   encryptForPublicKey,
   loadPublicKey,
 } from '../src/index.js';
-import type { EncWrapper } from '../src/index.js';
+import type { BinaryFetchResult, EncWrapper } from '../src/index.js';
 import { encryptForKey, loadVector, loadVectorPrivateKey } from './helpers.js';
 
 const vector = loadVector();
@@ -108,9 +108,9 @@ test('connection detail typed + slug-keyed', () => {
 
 test('binary handle lazy fetch and decrypt', async () => {
   const captured: { url?: string } = {};
-  const fetch = (url: string): EncWrapper => {
+  const fetch = (url: string): BinaryFetchResult => {
     captured.url = url;
-    return vector.binary.wrapper;
+    return { encrypted: true, wrapper: vector.binary.wrapper };
   };
   const detail = {
     connection_id: 'csc-1',
@@ -177,7 +177,7 @@ test('change field_updated binary is a lazy handle', async () => {
       { id: 'chg-50', event: 'field_updated', person_user_id: 'person-1', slug: 'logo', value_url: 'https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file', live: true, at: '2026-06-17T12:00:00Z' },
     ],
   };
-  const fetch = (): EncWrapper => vector.binary.wrapper;
+  const fetch = (): BinaryFetchResult => ({ encrypted: true, wrapper: vector.binary.wrapper });
   const [chg] = Change.listFromApi(body, { typeForSlug: () => 'photo', decryptValue, binaryFetch: fetch });
   assert.ok(chg.value instanceof BinaryHandle);
   const data = await (chg.value as BinaryHandle).bytes();

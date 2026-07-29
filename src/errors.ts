@@ -54,8 +54,23 @@ export class ApiError extends AllusError {
   readonly errorKey: string | null;
   /** The human-readable message (distinct from the formatted `Error.message`). */
   readonly apiMessage: string | null;
+  /**
+   * The error body's remaining fields, verbatim.
+   *
+   * #590 added the first response that carries actionable data BESIDE the key: a 410
+   * `company_data.file_expired` returns the expired answer's `content_sha256` and `expired_at`, so a
+   * consumer can record that its archived copy is now the only one and still prove what it holds.
+   * Generic rather than a bespoke subclass — every error body's extra fields become reachable, and
+   * no future one needs a new error type to be readable.
+   */
+  readonly details: Record<string, unknown>;
 
-  constructor(status: number, errorKey: string | null = null, message: string | null = null) {
+  constructor(
+    status: number,
+    errorKey: string | null = null,
+    message: string | null = null,
+    details: Record<string, unknown> = {},
+  ) {
     const parts: string[] = [`HTTP ${status}`];
     if (errorKey) parts.push(`(${errorKey})`);
     if (message) parts.push(`: ${message}`);
@@ -63,6 +78,7 @@ export class ApiError extends AllusError {
     this.status = status;
     this.errorKey = errorKey;
     this.apiMessage = message;
+    this.details = details;
   }
 }
 

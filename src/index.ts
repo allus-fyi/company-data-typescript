@@ -48,7 +48,7 @@ export {
   GCM_IV_LEN,
   GCM_TAG_LEN,
 } from './crypto.js';
-export type { EncWrapper, BinaryFetch, DecryptWrapper } from './crypto.js';
+export type { EncWrapper, BinaryFetch, BinaryFetchResult, DecryptWrapper } from './crypto.js';
 
 // errors
 export {
@@ -72,7 +72,7 @@ export {
 
 // transport
 export { HttpClient, FetchTransport } from './http.js';
-export type { HttpTransport, HttpResponse, HttpClientOptions, RequestBody, Sleep, Clock } from './http.js';
+export type { HttpTransport, HttpResponse, RawResponse, HttpClientOptions, RequestBody, Sleep, Clock } from './http.js';
 
 // output model
 export {
