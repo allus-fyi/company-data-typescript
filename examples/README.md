@@ -3,7 +3,7 @@
 A runnable demo of **everything the SDK does**, across three scenario families:
 
 - **Identity** — "Sign in with allme" (redirect + detached), one-time claims, stay-connected,
-  standard **OIDC** login (via the `openid-client` library), OIDC-continue-on-phone, 2FA-at-consent
+  standard **OIDC** login (via the `openid-client` library), 2FA-at-consent
   (a guide card), and standalone **service-2FA** with enrollment.
 - **Flow** — run a **contract flow** end-to-end: trigger it, drive the company party through it with
   type-checked step filling, hand a turn to the person's phone, then read the decrypted answers and
@@ -89,7 +89,7 @@ only one example runs at a time.
 
 Open the handler for a family and every SDK call is right there:
 
-- `src/handlers/identity.ts` — the identity scenarios (ids 1–8)
+- `src/handlers/identity.ts` — the identity scenarios (ids 1–5, 7–8)
 - `src/handlers/flow.ts` — the contract-flow scenario (`flow:run`)
 - `src/handlers/companyData.ts` — the company-data scenarios (`companydata:*`)
 
@@ -105,7 +105,6 @@ bundle server) — not the SDK example.
 | 3 | One-time claims | `authorizeUrl('one_time', {claims})` → `completeSignIn` (decrypts values with the config'd app key) |
 | 4 | Connect (stay-connected) | `authorizeUrl('connect', …)` → `completeSignIn`, then `Client.connections()` for LIVE values |
 | 5 | OIDC login | `openid-client`: `discovery` → `buildAuthorizationUrl` (PKCE) → `authorizationCodeGrant` (id_token verified) |
-| 6 | OIDC — continue on phone | same as 5; completion via the phone's redirect leg |
 | 7 | 2FA at consent — **GUIDE** | no `/start`; a checklist + links to scenarios 1 & 5 where the 2FA prompt is observed |
 | 8 | Standalone service-2FA + enroll | `Client.twoFactor.challenge` → `waitForResult`; `/enroll` runs `authorizeUrl('2fa_enroll', …)` (redirect & detached) |
 
@@ -163,7 +162,7 @@ run and collects events two ways:
 
 - **One server, one port, all three families.** A single Node `http` process serves the static bundle,
   the whole contract API, the identity OAuth `/callback`, and the public company-data `POST /webhook`.
-  `GET /api/meta` lists all 14 scenarios (8 identity + 1 flow + 5 company-data) at `contractVersion 3`.
+  `GET /api/meta` lists all 13 scenarios (7 identity + 1 flow + 5 company-data) at `contractVersion 3`.
   A scenario request is dispatched to its family by id (integers → identity, `flow:*` → flow,
   `companydata:*` → company-data).
 - **Config-file model.** `POST /api/scenarios/{id}/config` writes the browser's settings to a canonical

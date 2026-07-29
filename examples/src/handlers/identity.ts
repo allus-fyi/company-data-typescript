@@ -18,9 +18,9 @@ import { TimeoutTransport } from '../timeoutTransport.js';
 import { sendJson, str } from '../http.js';
 
 /**
- * The IDENTITY scenario family (ids 1–8). Every handler here reaches the SDK's intended top-level surface
- * — OAuthClient (authorizeUrl / completeSignIn / pollResult), the service data Client (connections /
- * twoFactor), or the openid-client library for the OIDC scenarios (5/6) — so a reader sees exactly which
+ * The IDENTITY scenario family (ids 1–5, 7–8). Every handler here reaches the SDK's intended top-level
+ * surface — OAuthClient (authorizeUrl / completeSignIn / pollResult), the service data Client (connections /
+ * twoFactor), or the openid-client library for the OIDC scenario (5) — so a reader sees exactly which
  * call implements each flow. The scaffolding (routing, config files, run store, static bundle) lives in
  * src/; this file is the identity example.
  *
@@ -39,7 +39,6 @@ const SCENARIOS: Record<number, 'runnable' | 'guide'> = {
   3: 'runnable',
   4: 'runnable',
   5: 'runnable',
-  6: 'runnable',
   7: 'guide',
   8: 'runnable',
 };
@@ -50,7 +49,7 @@ const SERVICE_SCENARIOS = new Set([4, 8]);
  * Scenarios whose {@link OAuthClient.completeSignIn} response can carry claim values (userinfo `values`
  * non-empty) and therefore need the OAuth app private key configured to decrypt them: mode one_time and
  * mode connect, both delivered as app-key ciphertext through userinfo. Mode signin (scenarios 1, 2) never
- * carries values; scenario 8 never calls this leg at all; scenarios 5/6 run the openid-client library
+ * carries values; scenario 8 never calls this leg at all; scenario 5 runs the openid-client library
  * instead of this SDK's decrypt path.
  */
 const CLAIM_VALUE_SCENARIOS = new Set([3, 4]);
@@ -239,9 +238,8 @@ export class IdentityHandler {
         return sendJson(res, { runId, action: { type: 'detached', url } });
       }
 
-      case 5: // OIDC login
-      case 6: {
-        // OIDC — continue on your phone
+      case 5: {
+        // OIDC login
         const config = await this.oidcConfigFor(idStr, host);
         const verifier = oidc.randomPKCECodeVerifier();
         const challenge = await oidc.calculatePKCECodeChallenge(verifier);
@@ -325,7 +323,7 @@ export class IdentityHandler {
         run.calls = addCall(run.calls, CALL_ENROLLED_CALLBACK);
       } else if (url.searchParams.get('code')) {
         const code = url.searchParams.get('code')!;
-        if (id === 5 || id === 6) {
+        if (id === 5) {
           await this.completeOidc(run, url, host);
         } else {
           await this.completeSignin(run, code, id);
@@ -445,7 +443,7 @@ export class IdentityHandler {
     run.result = result;
   }
 
-  /** Complete an OIDC sign-in (scenarios 5/6) via the openid-client library — id_token verified. */
+  /** Complete an OIDC sign-in (scenario 5) via the openid-client library — id_token verified. */
   private async completeOidc(run: RunRecord, currentUrl: URL, host: string): Promise<void> {
     const idStr = String(Number(run.scenario ?? 0));
     const config = await this.oidcConfigFor(idStr, host);
