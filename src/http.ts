@@ -57,7 +57,7 @@ export interface HttpResponse {
 /**
  * A materialized 2xx response: the status, the raw body bytes, and the headers.
  *
- * #590: the company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
+ * The company-facing binary file endpoints have two 200 shapes (a JSON wrapper for an
  * encrypted answer, raw file bytes for a plaintext one) that are told apart by `Content-Type`, and
  * both carry an `X-Allus-Content-Sha256` digest header — so the caller needs the headers AND the
  * unparsed body. The body is read eagerly (a Fetch `Response` streams its body exactly once), so a
@@ -284,7 +284,7 @@ export class HttpClient {
   /**
    * GET `path` → the whole 2xx response: status, headers AND raw body, with no parse.
    *
-   * #590: the company-facing binary file endpoints have two 200 shapes told apart by
+   * The company-facing binary file endpoints have two 200 shapes told apart by
    * `Content-Type`, and both carry an `X-Allus-Content-Sha256` digest header. Neither {@link get}
    * (which parses) nor {@link getRaw} (which drops the headers) can express that, so this hands the
    * caller the response itself. Auth/refresh/retry and error mapping are identical.
@@ -389,7 +389,7 @@ export class HttpClient {
 
       if (status === 429) {
         const { errorKey, message } = await extractError(resp);
-        // #481: a pending-cap 429 means the caller already holds the maximum concurrent
+        // A pending-cap 429 means the caller already holds the maximum concurrent
         // 2FA challenges — a retry can never clear that, so surface it immediately as an
         // ApiError instead of the blind Retry-After backoff every other 429 gets.
         if (errorKey === 'twofa.pending_cap') {
@@ -435,7 +435,7 @@ export class HttpClient {
    * Parse a 2xx body per the configured wire format: the XXE-safe XML parser when the client is
    * configured for `xml`, JSON otherwise. An empty body parses to `{}`.
    *
-   * Public since #590: {@link Client}'s binary fetch classifies a {@link getResponse} itself and
+   * {@link Client}'s binary fetch classifies a {@link getResponse} itself and
    * then has to parse the structured shape the way every OTHER endpoint is parsed — a hard-coded
    * JSON parse here would silently lose XML support on exactly one endpoint.
    */
@@ -461,7 +461,7 @@ export class HttpClient {
   /**
    * `true` when this client is configured for the XML wire format.
    *
-   * #590: the binary file fetch parses the structured shape itself, and must do it the way the rest
+   * The binary file fetch parses the structured shape itself, and must do it the way the rest
    * of this client does — an XML-configured client would otherwise silently lose XML support on
    * exactly one endpoint.
    */
@@ -501,7 +501,7 @@ async function extractError(
     const rec = body as Record<string, unknown>;
     const errorKey = rec['error_key'];
     const message = rec['error'] ?? rec['message'];
-    // #590: everything BESIDE the key and the message travels on as `details`, so a body that
+    // Everything BESIDE the key and the message travels on as `details`, so a body that
     // carries actionable data (a 410 file_expired's content_sha256 + expired_at) is readable
     // without a bespoke error type per response.
     const details = { ...rec };

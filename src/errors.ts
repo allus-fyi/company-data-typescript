@@ -1,5 +1,5 @@
 /**
- * Error taxonomy — the same names across all six SDKs.
+ * Error taxonomy.
  *
  * | Error                          | When                                              |
  * |--------------------------------|---------------------------------------------------|
@@ -57,7 +57,7 @@ export class ApiError extends AllusError {
   /**
    * The error body's remaining fields, verbatim.
    *
-   * #590 added the first response that carries actionable data BESIDE the key: a 410
+   * Some responses carry actionable data BESIDE the key: a 410
    * `company_data.file_expired` returns the expired answer's `content_sha256` and `expired_at`, so a
    * consumer can record that its archived copy is now the only one and still prove what it holds.
    * Generic rather than a bespoke subclass — every error body's extra fields become reachable, and
@@ -86,7 +86,7 @@ export class ApiError extends AllusError {
 export class WebhookError extends AllusError {}
 
 /**
- * A submitted value failed field-type validation (#302) before encryption.
+ * A submitted value failed field-type validation before encryption.
  *
  * Carries the offending field `slug` and its `fieldType` so the caller can point
  * at the bad answer without shipping malformed ciphertext.

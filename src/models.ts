@@ -93,7 +93,7 @@ export class RequestField {
     readonly type: string,
     readonly oneTime: boolean,
     readonly mandatory: boolean,
-    /** Which customer TYPE this row applies to: "person" | "company" | "both" (B2B, #163); null on older API. */
+    /** Which customer TYPE this row applies to: "person" | "company" | "both" (B2B); null on older API. */
     readonly audience: string | null,
     readonly raw: Json,
   ) {}
@@ -127,7 +127,7 @@ export class RequestField {
  * `updatedAt` = when this answer last changed. Both ride on the Value (per-answer),
  * not the definition.
  */
-/** #311: recompute the verified flag from the just-decrypted plaintext (email string only). */
+/** Recompute the verified flag from the just-decrypted plaintext (email string only). */
 function verifiedFrom(obj: Json, plaintext: unknown): boolean {
   if (typeof plaintext !== 'string') return false;
   const vhash = obj['verified_hash'];
@@ -215,7 +215,7 @@ export class Connection {
     readonly displayName: string | null,
     readonly connectedAt: Date | null,
     readonly values: Record<string, Value>,
-    /** The connected customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
+    /** The connected customer's TYPE: "person" | "company" (B2B); null on older API. */
     readonly customerType: string | null,
     /** The customer's profile share code (previously only via `raw`); null when absent. */
     readonly shareCode: string | null,
@@ -315,11 +315,11 @@ export class Change {
     readonly cancelEffectiveDate: string | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
-    /** The customer's TYPE: "person" | "company" (B2B, #163); null on older API. */
+    /** The customer's TYPE: "person" | "company" (B2B); null on older API. */
     readonly customerType: string | null,
-    /** #344: set on `key_rotated` — SHA-256 fingerprint of the person's NEW public key (else null). */
+    /** Set on `key_rotated` — SHA-256 fingerprint of the person's NEW public key (else null). */
     readonly publicKeySha256: string | null,
-    /** #311: true iff a field_updated value is verified (hash matches the decrypted plaintext). */
+    /** True iff a field_updated value is verified (hash matches the decrypted plaintext). */
     readonly verified: boolean,
     readonly at: Date | null,
     readonly raw: Json,
@@ -350,7 +350,7 @@ export class Change {
     const personIdRaw = obj['person_user_id'] ?? obj['person_id'];
     const shareCodeRaw = obj['share_code'];
     const documentIdRaw = obj['document_id'];
-    // #436: `2fa_challenge_completed` carries the outcome in `status` (approved | denied | revoked);
+    // `2fa_challenge_completed` carries the outcome in `status` (approved | denied | revoked);
     // its `challenge_id` and `completed_at` stay available on `raw`. The poll is the record (spec §3).
     const statusRaw =
       event === 'document_status_changed' || event === '2fa_challenge_completed' ? obj['status'] : null;

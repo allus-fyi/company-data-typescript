@@ -318,7 +318,7 @@ export class Runtime {
   }
 }
 
-// ── the "what just happened" trace (#578) ───────────────────────────────────────
+// ── the "what just happened" trace ──────────────────────────────────────────────
 
 /**
  * Append a call name to a run's "what just happened" trace, preserving first-occurrence order and
@@ -331,8 +331,9 @@ export class Runtime {
  * A run that ends `failed` is still a run the panel reports, and the call the reader most needs to see is
  * the one that threw — a bad client secret, a 429, a decrypt failure. An append placed after the call is
  * skipped by the very exception the reader is trying to understand, so the panel would say only that the
- * client was constructed. This is the same under-reporting #578 exists to remove, one path further in;
- * the rule is the invariant, not a per-scenario habit. A bulk call records one entry per attempt, so a
+ * client was constructed. This is the same under-reporting this rule exists to remove, one path
+ * further in; the rule is the invariant, not a per-scenario habit. A bulk call records one entry per
+ * attempt, so a
  * partial run shows exactly how far it got.
  */
 export function addCall(calls: string[] | undefined, name: string): string[] {

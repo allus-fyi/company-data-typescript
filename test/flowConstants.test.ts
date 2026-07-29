@@ -1,8 +1,8 @@
 /**
  * Flow constants (computed variables) parity — every case in the shared
- * contract-flow-constants-vector.json must pass. The same vector pins the JS
- * reference + the python/iOS/Android/Go/C#/Java/PHP ports. Sibling of the
- * frozen condition vector in test/flowCondition.test.ts.
+ * contract-flow-constants-vector.json must pass, keeping this port aligned with every
+ * other implementation of the same contract. Sibling of the frozen condition vector
+ * in test/flowCondition.test.ts.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

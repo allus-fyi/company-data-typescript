@@ -1,4 +1,4 @@
-/** "Sign in with allme" RP OAuth client tests (#195). Ports test_oauth.py. */
+/** "Sign in with allme" RP OAuth client tests. Ports test_oauth.py. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -114,7 +114,7 @@ test('authorizeUrl pkce + detached', () => {
 
 test('authorizeUrl claim validation drops binary/empty', () => {
   const c = new OAuthClient(idwCfg());
-  // #498: every claim carries a mandatory `name` — the identity everything downstream is keyed by.
+  // Every claim carries a mandatory `name` — the identity everything downstream is keyed by.
   const claims: Claim[] = [
     { name: 'email', type: 'email', suggest: 'email_personal' },
     { name: 'avatar', type: 'photo' },
@@ -129,7 +129,7 @@ test('authorizeUrl claim validation drops binary/empty', () => {
   assert.equal(parsed[1].required, true);
 });
 
-// #498 §2: a nameless claim, and two sharing a name, are refused at the call that made them.
+// §2: a nameless claim, and two sharing a name, are refused at the call that made them.
 test('authorizeUrl requires a claim name and rejects duplicates', () => {
   const c = new OAuthClient(idwCfg());
   assert.throws(() => c.authorizeUrl('one_time', { claims: [{ type: 'email' } as Claim] }), ConfigError);
@@ -138,7 +138,7 @@ test('authorizeUrl requires a claim name and rejects duplicates', () => {
   }), ConfigError);
 });
 
-// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+// §3: `verified` travels on the wire, so an RP can demand an attested answer.
 test('authorizeUrl carries the verified requirement', () => {
   const c = new OAuthClient(idwCfg());
   const { q } = parseUrl(c.authorizeUrl('signin', {
@@ -172,7 +172,7 @@ test('exchange + userinfo', async () => {
   assert.equal(t.posts[0].form.grant_type, 'authorization_code');
   assert.equal(t.posts[0].form.code_verifier, 'V');
   const info = await c.userinfo('AT');
-  // #498 §5: `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
+  // §5: `sub` IS the share code (byte-identical to the id_token's); display_name is gone.
   assert.equal(info.sub, 'AB12CD');
   assert.equal(info.sub, info.share_code);
   assert.equal(info.display_name, undefined);
@@ -195,7 +195,7 @@ test('completeSignIn decrypts one_time values', async () => {
     assert.equal(out.mode, 'one_time');
     assert.equal(out.two_factor, true);
     assert.equal(out.user.sub, 'AB12CD');
-    // #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+    // §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
     assert.deepEqual(out.attestations, {});
     assert.equal(out.values.email_personal, VECTOR.text.plaintext);
   } finally {
@@ -220,7 +220,7 @@ test('pollResult expired throws', async () => {
   await assert.rejects(() => c.pollResult('DET1', { interval: 0.01, timeout: 5 }), (e: unknown) => e instanceof ApiError && (e as ApiError).status === 410);
 });
 
-// ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────────
+// ── 2fa_enroll mode + detached enrollment poll delivery ────────────────────
 test('authorizeUrl accepts 2fa_enroll mode', () => {
   const c = new OAuthClient(idwCfg());
   const { q } = parseUrl(c.authorizeUrl('2fa_enroll', { responseMode: 'detached', state: 'EN1' }));
@@ -229,7 +229,7 @@ test('authorizeUrl accepts 2fa_enroll mode', () => {
 });
 
 test('pollResult pending then enrolled', async () => {
-  // #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. pollResult must
+  // A detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. pollResult must
   // return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
   const t = new FakeTransport();
   t.queuePost(new FakeResponse(202), new FakeResponse(200, { enrolled: true, state: 'EN1' }));

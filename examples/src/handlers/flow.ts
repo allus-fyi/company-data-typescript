@@ -39,10 +39,8 @@ const PARTY_CUSTOMER = 'customer';
 const INVALID_EMAIL = 'not-an-email';
 
 /**
- * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
- * scenario>`, appended AT the call site, in the order the calls were made. The annotations are
- * byte-identical in all six SDK examples — only the method reference is written in the language's own
- * idiom — so one scenario teaches one thing whichever example a reader starts. Keep them in step when
+ * The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
+ * scenario>`, appended AT the call site, in the order the calls were made. Keep them in step when
  * this handler changes.
  */
 const CALL_SERVICE_BUILD =
@@ -352,8 +350,8 @@ export class FlowHandler {
   /**
    * The GET /api/runs/{runId} response: the SHARED run envelope (outer
    * {status:"pending"|"done"|"failed", result?, error?, calls}) with the pinned FLOW shape nested under
-   * `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, document?}). The shared
-   * frontend reads progress ONLY from `run.result` and keeps polling ONLY while the outer status is
+   * `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, document?}). Progress is
+   * meant to be read ONLY from `run.result`, with polling continuing ONLY while the outer status is
    * "pending", so the inner flow status must NOT sit at the top level — it drives under "pending" until
    * the platform run completes ("done") or errors ("failed").
    */

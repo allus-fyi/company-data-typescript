@@ -33,7 +33,7 @@ class FakeResponse implements HttpResponse {
     this.hdrs = headers;
   }
   /**
-   * #590: a non-JSON 200 — the raw file bytes under the file's own Content-Type, which is what the
+   * A non-JSON 200 — the raw file bytes under the file's own Content-Type, which is what the
    * slot endpoint serves when the person's source field is NOT private.
    */
   static bytes(status: number, body: Buffer, headers: Record<string, string>): FakeResponse {
@@ -43,7 +43,7 @@ class FakeResponse implements HttpResponse {
     return this.bodyBytes.toString('utf8');
   }
   async arrayBuffer(): Promise<ArrayBuffer> {
-    // Binary-safe: #590's plaintext shape carries bytes a utf-8 round-trip would mangle, so the
+    // Binary-safe: the plaintext shape carries bytes a utf-8 round-trip would mangle, so the
     // double must offer the same accessor the real Fetch Response does.
     const copy = Buffer.from(this.bodyBytes);
     return copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength) as ArrayBuffer;
@@ -303,7 +303,7 @@ test('binary handle fetches slot and decrypts', async () => {
 });
 
 /**
- * #590 — the SAME slot URL serves raw file bytes when the person's source field is NOT private.
+ * The SAME slot URL serves raw file bytes when the person's source field is NOT private.
  * The handle must return the file either way, without the caller knowing which shape arrived, and
  * must not try to decrypt bytes that were never encrypted.
  */
@@ -344,7 +344,7 @@ test('binary handle serves plaintext bytes', async () => {
 });
 
 /**
- * #590 — the binary fetch classifies the response itself, so it must parse the structured shape the
+ * The binary fetch classifies the response itself, so it must parse the structured shape the
  * way every other endpoint is parsed. An XML-configured client speaks XML everywhere else; a
  * hard-coded JSON parse here would lose XML support on exactly this one endpoint.
  *
@@ -380,7 +380,7 @@ test('binary handle parses the encrypted shape as XML for an xml-format client',
   });
 });
 
-/** #590 — a 410 file_expired surfaces the digest and the expiry date through ApiError.details. */
+/** A 410 file_expired surfaces the digest and the expiry date through ApiError.details. */
 test('binary handle expired answer carries digest', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);

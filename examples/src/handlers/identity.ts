@@ -56,7 +56,7 @@ const DEFAULT_AUTHORIZE_BASE = DEFAULT_AUTHORIZE_URL; // https://web.allme.fyi/a
 const POLL_TIMEOUT_MS = 2000;
 
 /**
- * Refusal when the request carries no Host header, so the browser's origin is unknown (#574). There is NO
+ * Refusal when the request carries no Host header, so the browser's origin is unknown. There is NO
  * default host: substituting one (localhost) silently sends the round-trip to a DIFFERENT origin than the
  * browser is on — a different localStorage and a redirect URI the OAuth app never registered.
  */
@@ -66,13 +66,11 @@ const NO_ORIGIN =
   'the setup again.';
 
 /**
- * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+ * The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
  * scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
- * parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
- * six SDK examples — only the method reference is written in the language's own idiom — so one scenario
- * teaches one thing whichever example a reader starts. Keep them in step when this handler changes: the
- * panel is headed "What just happened", and a list that no longer matches the code is worse than a short
- * one.
+ * parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this handler
+ * changes: the panel is headed "What just happened", and a list that no longer matches the code is
+ * worse than a short one.
  */
 const CALL_IDW_BUILD =
   'OAuthClient.fromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI';
@@ -142,7 +140,7 @@ export class IdentityHandler {
   async config(idStr: string, host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
     const id = Number(idStr);
     if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
-    // The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse rather
+    // The redirect URI is derived from THIS request's origin and from nothing else. Refuse rather
     // than invent a host: the suite renders this sentence on Save.
     if (host === '') return sendJson(res, { error: NO_ORIGIN }, 400);
 
@@ -234,7 +232,7 @@ export class IdentityHandler {
 
       case 5: // OIDC login
       case 6: {
-        // OIDC — continue on your phone (#431)
+        // OIDC — continue on your phone
         const config = await this.oidcConfigFor(idStr, host);
         const verifier = oidc.randomPKCECodeVerifier();
         const challenge = await oidc.calculatePKCECodeChallenge(verifier);
@@ -312,7 +310,7 @@ export class IdentityHandler {
 
     try {
       if (url.searchParams.get('enrolled') === 'true') {
-        // Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
+        // Redirect-leg enrollment outcome — nothing to exchange; record it.
         run.status = 'done';
         run.result = { enrolled: true };
         run.calls = addCall(run.calls, CALL_ENROLLED_CALLBACK);
@@ -475,7 +473,7 @@ export class IdentityHandler {
 
   /**
    * Whether `oauthClientFor` takes the named-constructor branch. The SAME predicate decides the client AND
-   * the trace entry, so the panel can never name a constructor that did not run (#578) — the local-stack
+   * the trace entry, so the panel can never name a constructor that did not run — the local-stack
    * option really does build the client a different way.
    */
   private usesDefaultAuthorizeBase(idStr: string): boolean {
@@ -483,7 +481,7 @@ export class IdentityHandler {
     return base === '' || base === DEFAULT_AUTHORIZE_URL;
   }
 
-  /** The trace entry for the OAuth client `oauthClientFor` just built (#578). */
+  /** The trace entry for the OAuth client `oauthClientFor` just built. */
   private idwBuildCall(idStr: string): string {
     return this.usesDefaultAuthorizeBase(idStr) ? CALL_IDW_BUILD : CALL_IDW_BUILD_LOCAL;
   }
@@ -496,7 +494,7 @@ export class IdentityHandler {
   }
 
   /**
-   * Build the openid-client Configuration (the #314 compliance surface) from the config file, sessionless.
+   * Build the openid-client Configuration (the OIDC compliance surface) from the config file, sessionless.
    * Discovery is driven off the configured api base (issuer override); http bases enable insecure requests
    * for the local stack. Auth uses client_secret_post — the token endpoint's method.
    */
@@ -517,7 +515,7 @@ export class IdentityHandler {
   /**
    * The redirect URI recorded in the scenario's config file (used by the OIDC library) — the SAME value
    * the authorize URL carried, so the two legs of the exchange cannot diverge. An absent/empty record
-   * re-derives from THIS request's origin; it never substitutes a host (#574).
+   * re-derives from THIS request's origin; it never substitutes a host.
    */
   private configRedirectUri(idStr: string, host: string): string {
     return str(this.rt.readConfig(idStr).oauth_redirect_uri) || this.redirectUri(host);
@@ -527,7 +525,7 @@ export class IdentityHandler {
 
   /**
    * The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
-   * Never falls back to a hardcoded host (#574) — `127.0.0.1` and `localhost` are DIFFERENT origins for
+   * Never falls back to a hardcoded host — `127.0.0.1` and `localhost` are DIFFERENT origins for
    * redirect matching and for browser storage alike, so a substituted default drops the developer on an
    * origin whose localStorage never held the setup and whose URI the OAuth app never registered.
    */
@@ -542,7 +540,7 @@ export class IdentityHandler {
     return ['email', 'phone']; // a small default claim set (spec §4 scenario 3)
   }
 
-  // #498: a claim carries a mandatory, unique `name` — the key `values` and `attestations` come back
+  // A claim carries a mandatory, unique `name` — the key `values` and `attestations` come back
   // under. The demo's config lists claim TYPES, so the type doubles as the name here; a real
   // integration usually names them for its own domain ("billing_email").
   private claimObjects(types: string[]): Claim[] {

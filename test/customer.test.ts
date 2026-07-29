@@ -1,5 +1,5 @@
 /**
- * CustomerClient (b2b, #168) — parse + method-shape + key-sourcing tests.
+ * CustomerClient (b2b) — parse + method-shape + key-sourcing tests.
  * Reuses the shared decryption vector's key as the customer ACCOUNT key (vector read-only).
  */
 import { test } from 'node:test';

@@ -1,5 +1,5 @@
 /**
- * #481 additions to the 2FA client: waitForResult (the base challenge/result client landed via #436).
+ * The 2FA client's additions on top of the base challenge/result client: waitForResult.
  * Ports test_two_factor.py.
  */
 import { test } from 'node:test';

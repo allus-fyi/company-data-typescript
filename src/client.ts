@@ -30,7 +30,7 @@
  *     map types every value (so `address` parses to an object, `photo` becomes a
  *     lazy binary handle, etc.).
  *   - **Binary** — a value's `BinaryHandle.bytes()` GETs the slot file endpoint and returns the
- *     file bytes. #590: that endpoint answers in one of two shapes depending on whether the
+ *     file bytes. That endpoint answers in one of two shapes depending on whether the
  *     person's source field is private — a `{"encrypted":true,"value":<wrapper>}` JSON envelope the
  *     service key decrypts, or the raw file bytes under the file's own Content-Type — and the
  *     handle hides the difference.
@@ -123,7 +123,7 @@ export class Client {
   // Recipient RSA public keys (by shareCode) — cached for per-person document
   // encryption. A public key is immutable + not a secret (fetched live, never configured).
   /**
-   * #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+   * A per-key GENERATION counter, bumped by every invalidation.
    *
    * JavaScript is single-threaded but NOT interleaving-free: the fetch path awaits an HTTP call
    * between the cache check and the store, and `invalidatePublicKey` — which the README tells
@@ -158,7 +158,7 @@ export class Client {
     this.accountKey = loadAccountKey(config);
   }
 
-  /** #436 2FA-by-allme — the relying-party challenge API (`twoFactor.challenge` / `twoFactor.result`). */
+  /** 2FA-by-allme — the relying-party challenge API (`twoFactor.challenge` / `twoFactor.result`). */
   private _twoFactor?: TwoFactorClient;
   get twoFactor(): TwoFactorClient {
     return (this._twoFactor ??= new TwoFactorClient(this.http, { sleep: this.sleep }));
@@ -183,7 +183,7 @@ export class Client {
   /**
    * Fetch a company-facing binary file endpoint and classify its response.
    *
-   * #590 — the endpoint has TWO 200 shapes and which one arrives is not the company's to predict:
+   * The endpoint has TWO 200 shapes and which one arrives is not the company's to predict:
    * a person whose source field is PRIVATE yields `application/json`
    * `{"encrypted":true,"value":<wrapper>}`, a person whose field is not yields the file's own
    * Content-Type and the bytes themselves. The decision is made on `Content-Type` and never by
@@ -405,7 +405,7 @@ export class Client {
   }
 
   /**
-   * #344 — drop a person's cached RSA public key, by share code.
+   * Drop a person's cached RSA public key, by share code.
    *
    * A public key is immutable, so caching one is safe until the person rotates it. Persons learn
    * about a rotation from a silent push; a SERVICE gets no pushes at all, so without a signal a
@@ -423,9 +423,9 @@ export class Client {
   }
 
   private decryptChange(event: Record<string, unknown>): Change {
-    // #344: the feed is a service's only rotation signal. Deliberately eventual — nothing rejects
+    // The feed is a service's only rotation signal. Deliberately eventual — nothing rejects
     // a document encrypted to a stale key, so a window remains until this event is drained.
-    // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+    // The pull feed names it `event`; a raw webhook body names it `action` (and on
     // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
     if ((event.event === 'key_rotated' || event.action === 'key_rotated')
       && typeof event.share_code === 'string' && event.share_code) {
@@ -727,7 +727,7 @@ export class Client {
   }
 
   /**
-   * #491 gap 2: download a document's file BYTES. {@link document} returns metadata only. This GETs
+   * Download a document's file BYTES. {@link document} returns metadata only. This GETs
    * `/documents/{id}/file`, which branches on the document's storage mode (server contract):
    *  - a BROADCAST (non-private) document is stored plaintext and served as RAW bytes → returned as-is;
    *  - a PER-PERSON / private document is encrypted to the RECIPIENT's key and served as
@@ -843,7 +843,7 @@ export class Client {
   }
 
   /**
-   * #491 gap 1: a completed run's DECRYPTED answers as `{ slug: plaintext }`. Accepts a loaded
+   * A completed run's DECRYPTED answers as `{ slug: plaintext }`. Accepts a loaded
    * {@link FlowRun} or a run id (fetched via {@link flowRun}). The public accessor for a finished
    * run's answers; the private {@link decryptRunAnswers} it wraps is otherwise reached only inside
    * {@link processFlowRun}, which returns an already-completed run untouched, so those answers were
@@ -855,7 +855,7 @@ export class Client {
   }
 
   /**
-   * #491 gap 2: download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
+   * Download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
    * file bytes. GETs `/flow-runs/{runId}/document/file`, which serves the company-party copy encrypted
    * to the SERVICE key (unlike {@link documentFile}'s recipient-targeted copy), so the same
    * {@link BinaryHandle} the slot-file download uses decrypts it → the `{"file":"data:…;base64,…"}`
@@ -870,7 +870,7 @@ export class Client {
   }
 
   /**
-   * #491 gap 3: this client's OWN identity — `{ company_user_id, service_id }` from
+   * This client's OWN identity — `{ company_user_id, service_id }` from
    * `GET /api/company-data/whoami`. The COMPANY party of a {@link triggerFlowRun} binding must bind
    * to `company_user_id` (the person party's user_id comes from the connection), so without this the
    * company-side binding was unconstructible through the SDK.
@@ -960,7 +960,7 @@ export class Client {
     const answersOut: Json[] = [];
     for (const [slug, val] of Object.entries(fill)) {
       const plain = typeof val === 'string' ? val : JSON.stringify(val);
-      // #302: validate the plaintext against the field's declared type (resolved from the
+      // Validate the plaintext against the field's declared type (resolved from the
       // pinned flow definition) before it is encrypted. A slug with no field element in the
       // graph resolves to null → skipped (do not invent a type).
       const ftype = flowFieldType(run.definition, slug);
@@ -1137,7 +1137,7 @@ function partyOf(definition: Json, nodeKey: string): string | null {
 }
 
 /**
- * Resolve a fill slug to its `field_type` from the pinned flow graph (#302).
+ * Resolve a fill slug to its `field_type` from the pinned flow graph.
  * Scans every node's `elements` for a `kind='field'` element with a matching
  * `slug`. Returns `null` when the slug has no field element (skip validation —
  * never invent a type).

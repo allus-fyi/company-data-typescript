@@ -20,11 +20,11 @@
 export { Client } from './client.js';
 export type { ClientOptions } from './client.js';
 
-// #436 2FA-by-allme — the relying-party challenge API (client.twoFactor).
+// 2FA-by-allme — the relying-party challenge API (client.twoFactor).
 export { TwoFactorClient } from './twoFactor.js';
 export type { TwoFactorChallenge, TwoFactorResult, ChallengeOptions, WaitForResultOptions } from './twoFactor.js';
 
-// Customer role (b2b, #168)
+// Customer role (b2b)
 export { CustomerClient } from './customer.js';
 export type {
   CustomerClientOptions,
@@ -62,7 +62,7 @@ export {
   ValidationError,
 } from './errors.js';
 
-// field-type value validation (#302)
+// field-type value validation
 export {
   isFieldValueValid,
   fieldValueError,
@@ -89,7 +89,7 @@ export {
 } from './models.js';
 export type { TypeForSlug } from './models.js';
 
-// contract-flow condition evaluator + computed constants (issue #79)
+// contract-flow condition evaluator + computed constants
 export {
   evaluateCondition,
   computeConstants,
@@ -115,7 +115,7 @@ export type {
 export { verifyWebhook, parseWebhook, handleWebhook, loadAccountKey } from './webhooks.js';
 export type { Headers } from './webhooks.js';
 
-// "Sign in with allme" — RP-side OAuth (#195)
+// "Sign in with allme" — RP-side OAuth
 export { OAuthClient, DEFAULT_AUTHORIZE_URL } from './oauth.js';
 export type {
   Attestation,

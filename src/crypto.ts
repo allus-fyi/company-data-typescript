@@ -1,5 +1,5 @@
 /**
- * Decryption core — byte-identical across all six SDKs.
+ * Decryption core.
  *
  * Every person value arrives as a ciphertext wrapper, encrypted **for the service
  * public key**; the SDK decrypts with the service private key. The algorithm MUST
@@ -248,7 +248,7 @@ export function encryptForPublicKey(plaintext: string, publicKey: KeyObject): En
 /**
  * One response from a company-facing binary file endpoint, in the shape a {@link BinaryHandle} needs.
  *
- * #590 — the route has TWO 200 shapes and the company cannot predict which it will get, because the
+ * The route has TWO 200 shapes and the company cannot predict which it will get, because the
  * answer depends on whether the person's source field is private, which is theirs to change:
  *
  * - **encrypted** — `application/json`, `{"encrypted":true,"value":<wrapper>}`. The wrapper decrypts
@@ -290,7 +290,7 @@ const DATA_URI_KEYS = ['full', 'file'] as const;
  * that URL and return the FILE BYTES either way — the caller never has to know
  * which of the two response shapes arrived.
  *
- * #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE
+ * THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE
  * COMPANY'S. Whether the person's source field is private decides it, they can change it at
  * any time, and nothing in the API announces it in advance:
  *
@@ -494,7 +494,7 @@ export class BinaryHandle {
 
 
 /**
- * #311 verified fields: true iff sha256(salt ‖ plaintext) === expectedHash (hex).
+ * Verified fields: true iff sha256(salt ‖ plaintext) === expectedHash (hex).
  * Consumers recompute this from the plaintext they just decrypted and trust the
  * verified flag ONLY on a match — a substituted/drifted value renders unverified.
  */

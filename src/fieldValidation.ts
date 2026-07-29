@@ -1,8 +1,8 @@
 /**
- * Shared field-type value validation (#302).
+ * Shared field-type value validation.
  *
- * Pure + i18n-free port of the web reference `frontend/src/fieldValidation.js`,
- * kept byte-aligned across web / allus / iOS / Android / the 6 SDKs by
+ * Pure + i18n-free port of the canonical field-validation reference, kept byte-aligned
+ * with every other implementation of the same contract by
  * `testdata/contract-field-validation-vector.json`. Spec:
  * `docs/superpowers/specs/2026-07-15-field-type-validation-design.html`.
  *
@@ -16,7 +16,7 @@
 
 import { COUNTRY_CODES, DIAL_CODES, US_STATE_CODES } from './countryData';
 
-// #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
+// Country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter code.
 // The code lists come from the generated country data (do NOT inline them — they would rot).
 const COUNTRY_CODE_SET = new Set(COUNTRY_CODES);
 const US_STATE_CODE_SET = new Set(US_STATE_CODES);
@@ -185,12 +185,12 @@ export function fieldValueError(type: string | null | undefined, value: unknown)
   return isFieldValueValid(type, value) ? null : type ?? '';
 }
 
-/** True if `code` is an assigned ISO 3166-1 alpha-2 country code (#303). */
+/** True if `code` is an assigned ISO 3166-1 alpha-2 country code. */
 export function isValidCountryCode(code: string | null | undefined): boolean {
   return code != null && COUNTRY_CODE_SET.has(code);
 }
 
-/** The ITU E.164 dial code (digits only, no `+`) for a country code, or `null` (#303). */
+/** The ITU E.164 dial code (digits only, no `+`) for a country code, or `null`. */
 export function dialCodeFor(code: string | null | undefined): string | null {
   return (code != null && DIAL_CODES[code]) || null;
 }

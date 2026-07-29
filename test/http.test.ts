@@ -253,7 +253,7 @@ test('429 exhausts retries then raises RateLimitError', async () => {
 
 test('429 pending_cap surfaces immediately without retry', async () => {
   await withTmp(async (dir) => {
-    // #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once
+    // A twofa.pending_cap 429 can never be cleared by a retry — it must surface at once
     // as ApiError, NOT go through the Retry-After backoff (which every other 429 gets).
     const t = new FakeTransport();
     t.postResponses = [tokenOk()];

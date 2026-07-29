@@ -1,6 +1,6 @@
 /**
- * FlowConditionEvaluator parity — every case in the shared vector must pass.
- * The same vector pins the PHP reference + the python/iOS/Android ports.
+ * FlowConditionEvaluator parity — every case in the shared vector must pass, keeping
+ * this port aligned with every other implementation of the same contract.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

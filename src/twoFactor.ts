@@ -1,5 +1,5 @@
 /**
- * #436 2FA-by-allme — the relying-party challenge API (spec §3), on the SERVICE's data-client
+ * 2FA-by-allme — the relying-party challenge API (spec §3), on the SERVICE's data-client
  * credentials (the same auth the {@link Client} uses). A service asks a person — addressed by their
  * `share_code` — to approve a login inside the allme app; it then polls for the outcome.
  *
@@ -93,7 +93,7 @@ export class TwoFactorClient {
    * Poll {@link result} until the status is terminal (no longer `pending`) and return that first
    * terminal {@link TwoFactorResult}.
    *
-   * Convenience over a manual {@link result} loop (#481; mirrors the OAuth `pollResult` precedent).
+   * Convenience over a manual {@link result} loop (mirrors the OAuth `pollResult` precedent).
    * Because the first terminal read burns the challenge, this returns as soon as the status leaves
    * `pending` — it never re-reads a consumed result. Rejects with {@link ApiError} if `timeout`
    * seconds elapse while still pending; `interval` is the seconds between polls.

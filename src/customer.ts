@@ -1,5 +1,5 @@
 /**
- * The CUSTOMER-role client (#168).
+ * The CUSTOMER-role client.
  *
  * `CustomerClient` is what a *connecting company* uses to consume and answer another
  * company's service over its `acct_*` credentials: list company↔company connections,
@@ -127,7 +127,7 @@ export class CustomerClient {
   private readonly http: HttpClient;
   private readonly accountKey: KeyObject | null;
   /**
-   * #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+   * A per-key GENERATION counter, bumped by every invalidation.
    *
    * JavaScript is single-threaded but NOT interleaving-free: the fetch path awaits an HTTP call
    * between the cache check and the store, and `invalidatePublicKey` — which the README tells
@@ -140,13 +140,13 @@ export class CustomerClient {
   private readonly pubKeyCache = new Map<string, KeyObject | null>();
   private readonly pubKeyGen = new Map<string, number>();
   /**
-   * #411: the SERVICE's public key, keyed "companyCode/serviceCode", with the same generation
+   * The SERVICE's public key, keyed "companyCode/serviceCode", with the same generation
    * guard as `pubKeyGen` above — see that comment for why the counter is not optional here.
    */
   private readonly serviceKeyCache = new Map<string, KeyObject | null>();
   private readonly serviceKeyGen = new Map<string, number>();
   // "companyCode/serviceCode" → {request_field_id: field_type}, resolved from the
-  // connect-screen lookup for typed-answer validation (#302).
+  // connect-screen lookup for typed-answer validation.
   private readonly requestTypeCache = new Map<string, Record<string, string>>();
   private _pump: Pump | null = null;
 
@@ -329,7 +329,7 @@ export class CustomerClient {
   }
 
   /**
-   * #344 — drop a person's cached RSA public key, by user id. See the Client method of the same
+   * Drop a person's cached RSA public key, by user id. See the Client method of the same
    * name; the changes feed calls this for you, webhook consumers must call it themselves.
    */
   invalidatePublicKey(userId: string): void {
@@ -339,7 +339,7 @@ export class CustomerClient {
   }
 
   /**
-   * #411 — drop a SERVICE's cached RSA public key, so the next answer/document you encrypt to it
+   * Drop a SERVICE's cached RSA public key, so the next answer/document you encrypt to it
    * refetches. The mirror of {@link invalidatePublicKey}, in the service→customer direction.
    *
    * The changes feed calls this for you on a `service_key_rotated` event. Webhook consumers must
@@ -354,15 +354,15 @@ export class CustomerClient {
   }
 
   private decryptChange(event: Record<string, unknown>): Change {
-    // #344: this cache also stores a negative (null) result, so without invalidation a person who
+    // This cache also stores a negative (null) result, so without invalidation a person who
     // had not generated keys yet would stay unresolvable for the process lifetime as well.
-    // #344: the pull feed names it `event`; a raw webhook body names it `action` (and on
+    // The pull feed names it `event`; a raw webhook body names it `action` (and on
     // document rows `action` carries signed|accepted|cancelled instead) — so match either key.
     if (event.event === 'key_rotated' || event.action === 'key_rotated') {
       const id = event.person_user_id ?? event.person_id;
       if (typeof id === 'string' && id) this.invalidatePublicKey(id);
     }
-    // #411: a service this customer connects to replaced its keypair — drop the cached copy so the
+    // A service this customer connects to replaced its keypair — drop the cached copy so the
     // next encryption refetches. Same either-key match as above: the pull feed names it `event`,
     // a raw webhook body names it `action`.
     if (event.event === 'service_key_rotated' || event.action === 'service_key_rotated') {
@@ -428,7 +428,7 @@ export class CustomerClient {
   /**
    * Resolve `{request_field_id: field_type}` for a service from the connect-screen
    * lookup, cached per company/service. Best-effort — a lookup failure yields an empty
-   * map so typed-answer validation is simply skipped (#302).
+   * map so typed-answer validation is simply skipped.
    */
   private async requestFieldTypes(companyCode: string, serviceCode: string): Promise<Record<string, string>> {
     const key = `${companyCode}/${serviceCode}`;
@@ -458,7 +458,7 @@ export class CustomerClient {
   ): Promise<Record<string, unknown>[]> {
     const pub = await this.serviceKey(companyCode, serviceCode);
     if (!pub) throw new ConfigError(`no service key for ${companyCode}/${serviceCode}`);
-    // #302: validate each typed answer against its request row's field type BEFORE
+    // Validate each typed answer against its request row's field type BEFORE
     // encryption. The type is resolved server-side from the connect-screen lookup
     // (cached per service); an answer whose type can't be resolved is skipped.
     const types = await this.requestFieldTypes(companyCode, serviceCode);
@@ -483,7 +483,7 @@ export class CustomerClient {
     const body = (await this.http.get(`${KEYS}/${companyCode}/${serviceCode}`)) as Record<string, unknown>;
     const spki = body?.['public_key'] as string | undefined;
     const loaded = spki ? loadPublicKey(spki) : null;
-    // #411: store ONLY if no invalidation happened while the request was in flight.
+    // Store ONLY if no invalidation happened while the request was in flight.
     if ((this.serviceKeyGen.get(key) ?? 0) === gen) this.serviceKeyCache.set(key, loaded);
     return loaded;
   }

@@ -1,7 +1,7 @@
 /**
- * Field-type value validation parity — every case in the shared vector must pass.
- * The same `contract-field-validation-vector.json` pins the web reference
- * (`frontend/src/fieldValidation.js`) + the iOS/Android/SDK ports.
+ * Field-type value validation parity — every case in the shared
+ * `contract-field-validation-vector.json` vector must pass, keeping this port
+ * byte-aligned with every other implementation of the same contract.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

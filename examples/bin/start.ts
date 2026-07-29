@@ -24,7 +24,7 @@ import { Server, CONTRACT_VERSION } from '../src/server.js';
  *   4. refuse a busy port with a clear message
  *   5. serve bundle + API + /callback + public /webhook on ONE port — SINGLE process = single worker,
  *      bound to ALL interfaces so a phone on the same network can reach it, and printing every URL it
- *      is reachable on (#553)
+ *      is reachable on
  */
 
 const RELEASE_BASE = 'https://github.com/allme-sdk/example-test-suite/releases/download';
@@ -73,9 +73,9 @@ async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 8091);
   const server = new Server(rt, frontend, VERSION);
   // Last-resort net BEHIND Server.handle()'s own guard — through the SAME `sendFailure` helper, so this
-  // process has exactly ONE failure envelope (#583 review pass 1). It used to write `{"error":
-  // "server_error", "message": "<reason>"}` by hand, and the suite renders `error` and nothing else, so
-  // anything reaching it arrived as one uninformative word with the reason stranded in `message`.
+  // process has exactly ONE failure envelope. Writing `{"error": "server_error", "message": "<reason>"}`
+  // by hand here instead would strand the reason in `message`, since the suite renders `error` and
+  // nothing else — leaving anything reaching this path as one uninformative word.
   const http = createServer((req, res) => {
     server.handle(req, res).catch((e) => sendFailure(res, e));
   });
@@ -91,14 +91,14 @@ async function main(): Promise<void> {
   });
 
   // Omitting the host binds the unspecified address — :: (dual-stack, so IPv4 too) where IPv6 is
-  // available, 0.0.0.0 otherwise. ALL interfaces, so a phone on the same network can reach it (#553).
+  // available, 0.0.0.0 otherwise. ALL interfaces, so a phone on the same network can reach it.
   http.listen(port, () => {
     printReachableUrls(port);
   });
 }
 
 /**
- * Announce every URL the server is reachable on (#553).
+ * Announce every URL the server is reachable on.
  *
  * The server binds all interfaces, so a phone on the same network can reach it — but only if the
  * person holding the phone knows which address to type. Print the loopback URL AND every non-loopback

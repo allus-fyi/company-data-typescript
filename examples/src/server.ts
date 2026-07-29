@@ -42,7 +42,7 @@ export class Server {
   // ── entry point ────────────────────────────────────────────────────────
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // EVERYTHING is inside the guard — request PREPROCESSING included (#583 review pass 1). Setup and
+    // EVERYTHING is inside the guard — request PREPROCESSING included. Setup and
     // parsing throw as readily as a handler does: `this.rt.ensureDirs()` on an unwritable `.runtime/`,
     // and `decodeURIComponent` on a malformed percent-escape (`GET /api/scenarios/5/start%` → Node hands
     // the raw target through, and `decodeURIComponent` raises `URIError: URI malformed`). Preprocessing
@@ -52,7 +52,7 @@ export class Server {
       this.rt.sweep(); // lazy TTL sweep on every request
 
       const method = req.method ?? 'GET';
-      // The browser's own origin, verbatim — NEVER a default synthesised from the port (#574). An empty
+      // The browser's own origin, verbatim — NEVER a default synthesised from the port. An empty
       // host reaches the identity handlers as '' and is refused there with a clear message; the parse base
       // below only has to make req.url's path and query readable, so it uses a host that cannot resolve
       // rather than a plausible-looking one.
@@ -87,7 +87,7 @@ export class Server {
       }
     } catch (e) {
       // A start-time / handler failure surfaces as a NON-2xx the shared client raises — never a 200
-      // without the success envelope. The reason rides in `error`, the only key the suite renders (#583).
+      // without the success envelope. The reason rides in `error`, the only key the suite renders.
       sendFailure(res, e);
     }
   }

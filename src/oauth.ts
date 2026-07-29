@@ -1,5 +1,5 @@
 /**
- * "Sign in with allme" — the RP-side OAuth client (#195).
+ * "Sign in with allme" — the RP-side OAuth client.
  *
  * A third-party site embeds a *Sign in with allme* button, sends the person to the hosted
  * consent screen, and — once they approve — receives an authorization code at its redirect URI.
@@ -25,18 +25,18 @@ const MODES = new Set(['signin', 'one_time', 'connect', '2fa_enroll']);
 const RESPONSE_MODES = new Set(['redirect', 'detached']);
 
 /**
- * A claim the relying party asks for — a REQUEST FIELD (#498).
+ * A claim the relying party asks for — a REQUEST FIELD.
  *
  * You describe what you need: a `name` (the claim's identity on the wire), a field `type`, an
- * advisory `suggest`ion, whether it is `required`, and whether only a #311-`verified` answer will do.
+ * advisory `suggest`ion, whether it is `required`, and whether only a `verified` answer will do.
  * You never name one of the person's fields — THEY decide which of theirs answers it.
  *
  * `name` is MANDATORY and must be unique within one request: everything downstream is keyed by it
  * (the stored mapping, the consent outcome, and the `values`/`attestations` maps this SDK returns).
  * Two claims sharing a name are rejected by the API rather than silently coalesced.
  *
- * `verified` is accepted only where it can be honoured (#498 §3.1b): on the OIDC flow, and only for a
- * type #311 can attest (v1: `email`). Sending it on a `one_time` request is refused with
+ * `verified` is accepted only where it can be honoured (§3.1b): on the OIDC flow, and only for a
+ * type that can be attested (v1: `email`). Sending it on a `one_time` request is refused with
  * `invalid_request` — that leg carries no source row id, so the server could neither enforce the
  * requirement nor attest it, and an unhonourable requirement is refused rather than quietly dropped.
  */
@@ -46,13 +46,13 @@ export interface Claim {
   type: string;
   suggest?: string;
   required?: boolean;
-  /** Only a #311-verified answer satisfies this claim. OIDC flow + verifiable types only. */
+  /** Only a verified answer satisfies this claim. OIDC flow + verifiable types only. */
   verified?: boolean;
   label?: string;
 }
 
 /**
- * #498 §3.1a — proof that a delivered value is the #311-verified one.
+ * §3.1a — proof that a delivered value is the verified one.
  *
  * Present only for a `verified` claim under ENCRYPTED delivery. The server builds and seals this
  * against your app key — a client-supplied attestation is never accepted — so it attests the server's
@@ -95,7 +95,7 @@ export interface OAuthClientOptions {
 
 export interface SignInResult {
   /**
-   * #498 §5: `sub` IS the person's share code and is byte-identical to the id_token's `sub`.
+   * §5: `sub` IS the person's share code and is byte-identical to the id_token's `sub`.
    * `share_code` is retained beside it for compatibility and now simply equals it. `display_name` is
    * gone — it is a consented `name` claim now, or nothing: ask for `{name: 'name', type: 'text'}` and
    * read `values.name`.
@@ -103,10 +103,10 @@ export interface SignInResult {
   user: { sub?: string; share_code?: string };
   mode?: string;
   two_factor: boolean;
-  /** Claim name → plaintext. Unchanged by #498. */
+  /** Claim name → plaintext. */
   values: Record<string, string>;
   /**
-   * Claim name → {@link Attestation}, keyed by the SAME slug as {@link values} (#498 §3.1a).
+   * Claim name → {@link Attestation}, keyed by the SAME slug as {@link values} (§3.1a).
    * Additive: an integration that never reads it behaves exactly as before. ABSENT = not attested.
    */
   attestations: Record<string, Attestation>;
@@ -172,11 +172,11 @@ export class OAuthClient {
     const seen = new Set<string>();
     for (const c of claims) {
       if (!c.type || NON_CLAIMABLE.has(c.type)) continue;
-      // #498 §2: `name` is the claim's identity and it is mandatory. Refused HERE rather than left to
+      // §2: `name` is the claim's identity and it is mandatory. Refused HERE rather than left to
       // the API, so the integration error surfaces at the call that made it.
       const name = (c.name ?? '').trim();
-      if (!name) throw new ConfigError('every claim must carry a `name` (#498)');
-      if (seen.has(name)) throw new ConfigError(`duplicate claim name '${name}' (#498)`);
+      if (!name) throw new ConfigError('every claim must carry a `name`');
+      if (seen.has(name)) throw new ConfigError(`duplicate claim name '${name}'`);
       seen.add(name);
       const entry: Record<string, unknown> = { name, type: c.type };
       if (c.suggest) entry.suggest = c.suggest;
@@ -242,7 +242,7 @@ export class OAuthClient {
   }
 
   /**
-   * #498 §3.1a — open the app-key-sealed attestations and attest each value ourselves.
+   * §3.1a — open the app-key-sealed attestations and attest each value ourselves.
    *
    * A SECOND decrypt per verified claim: `values` is byte-identical to before, but each attestation is
    * its own `{"_enc":1,…}` object. A passthrough accessor that handed back an undecrypted blob would
@@ -300,7 +300,7 @@ export class OAuthClient {
    * Poll /oauth2/result for a detached sign-in or enrollment (single-delivery).
    *
    * A detached sign-in returns `{code, state}`; a detached `2fa_enroll` returns
-   * `{enrolled: true, state}` (#481). Returns on the first delivered shape (`code` OR
+   * `{enrolled: true, state}`. Returns on the first delivered shape (`code` OR
    * `enrolled`) and never polls past it, so a one-shot enrollment result is not consumed and lost.
    */
   async pollResult(state: string, opts: { timeout?: number; interval?: number } = {}): Promise<Record<string, unknown>> {
@@ -314,7 +314,7 @@ export class OAuthClient {
       const resp = await this.transport.post(`${this.apiUrl}/oauth2/result`, form, { Accept: 'application/json' });
       if (resp.status === 200) {
         const body = await this.json(resp);
-        // #481: return on the first delivered terminal shape — a sign-in `code` OR a
+        // Return on the first delivered terminal shape — a sign-in `code` OR a
         // `2fa_enroll` `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
         // returning here (rather than looping) is what keeps an enrollment result from being
         // consumed and lost to a timeout.

@@ -28,7 +28,7 @@ const ENV_MAP: Record<string, string> = {
   customerClientSecret: 'ALLUS_CUSTOMER_CLIENT_SECRET',
   accountPrivateKey: 'ALLUS_ACCOUNT_PRIVATE_KEY',
   accountPassphrase: 'ALLUS_ACCOUNT_PASSPHRASE',
-  // "Sign in with allme" idw role (#195).
+  // "Sign in with allme" idw role.
   oauthClientId: 'ALLUS_OAUTH_CLIENT_ID',
   oauthRedirectUri: 'ALLUS_OAUTH_REDIRECT_URI',
   oauthClientSecret: 'ALLUS_OAUTH_CLIENT_SECRET',
@@ -38,8 +38,7 @@ const ENV_MAP: Record<string, string> = {
   format: 'ALLUS_FORMAT',
 };
 
-// JSON file keys are snake_case (identical across all six SDKs' config files);
-// this maps a Config attribute back to the file key it reads.
+// JSON file keys are snake_case; this maps a Config attribute back to the file key it reads.
 const FILE_KEY: Record<string, string> = {
   apiUrl: 'api_url',
   clientId: 'client_id',
@@ -62,9 +61,9 @@ const FILE_KEY: Record<string, string> = {
 const WEBHOOK_SECRET_ENV = 'ALLUS_WEBHOOK_SECRET';
 
 const REQUIRED = ['apiUrl', 'clientId', 'clientSecret', 'servicePrivateKey', 'keyPassphrase'] as const;
-// Customer role (#168): the acct_* pair + the account key that decrypts received docs/flow copies.
+// Customer role: the acct_* pair + the account key that decrypts received docs/flow copies.
 const REQUIRED_CUSTOMER = ['apiUrl', 'customerClientId', 'customerClientSecret', 'accountPrivateKey'] as const;
-// "Sign in with allme" idw role (#195): only the client id + redirect are required. The app private
+// "Sign in with allme" idw role: only the client id + redirect are required. The app private
 // key + passphrase are needed lazily (one_time value decryption), checked in OAuthClient.
 const REQUIRED_IDW = ['apiUrl', 'oauthClientId', 'oauthRedirectUri'] as const;
 
@@ -120,7 +119,7 @@ export class Config {
   readonly clientSecret: string | null;
   readonly servicePrivateKey: string | null; // path to the OpenSSL-encrypted PKCS#8 PEM
   readonly keyPassphrase: string | null; // decrypts the service PEM in memory
-  // Customer role (#168): the acct_* client pair the connecting company uses.
+  // Customer role: the acct_* client pair the connecting company uses.
   readonly customerClientId: string | null;
   readonly customerClientSecret: string | null;
 
@@ -128,7 +127,7 @@ export class Config {
   readonly accountPrivateKey: string | null;
   readonly accountPassphrase: string | null;
 
-  // "Sign in with allme" idw role (#195). The idw_* app the RP embeds; the private key +
+  // "Sign in with allme" idw role. The idw_* app the RP embeds; the private key +
   // passphrase are needed only to decrypt one_time claim values (config-only key handling).
   readonly oauthClientId: string | null;
   readonly oauthRedirectUri: string | null;
@@ -212,7 +211,7 @@ export class Config {
     return Config.build({});
   }
 
-  /** Load a CUSTOMER-role config (#168) from a JSON file — requires the acct_* pair
+  /** Load a CUSTOMER-role config from a JSON file — requires the acct_* pair
    * + account key, not the service PEM. Env vars override file values. */
   static fromCustomerFile(path: string): Config {
     let raw: string;
@@ -242,7 +241,7 @@ export class Config {
     return Config.build({}, 'customer');
   }
 
-  /** Load an IDW-role config (#195, "Sign in with allme") from a JSON file — requires the
+  /** Load an IDW-role config ("Sign in with allme") from a JSON file — requires the
    * oauth_client_id + oauth_redirect_uri. Env vars override file values. */
   static fromIdwFile(path: string): Config {
     let raw: string;

@@ -48,11 +48,9 @@ const DEFAULT_API_URL = 'https://api.allme.fyi';
 const FEED_TIMEOUT_MS = 2000;
 
 /**
- * The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+ * The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
  * scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
- * parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
- * six SDK examples — only the method reference is written in the language's own idiom — so one scenario
- * teaches one thing whichever example a reader starts. Keep them in step when this handler changes.
+ * parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this handler changes.
  */
 const CALL_SERVICE_BUILD =
   'Client.fromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase';
@@ -329,7 +327,7 @@ export class CompanyDataHandler {
    * Start the single accumulating webhook run. Persists the routing record webhookId → runId (superseding
    * any prior active webhook run) and returns {action:{type:"none"}} — there is NO long-poll (it would
    * wedge the single worker). Events arrive via POST /webhook and via a per-poll drainBatch() feed
-   * fallback; the frontend reads the growing list through GET /api/runs.
+   * fallback; the growing list is exposed via GET /api/runs for polling.
    */
   private startWebhook(res: ServerResponse): void {
     const webhookId = str(this.rt.readConfigMeta(WEBHOOK).webhook_id);
@@ -471,9 +469,9 @@ export class CompanyDataHandler {
 
   /**
    * The rendered-column projection of a Change PLUS a raw object holding the full public Change fields,
-   * so the frontend's JSON.stringify(result) Raw view can show the event-specific extras. Nothing is
-   * dropped from result. `source` labels a webhook delivery vs a pull-feed row (null for the changes
-   * scenario, where every row is a pull-feed drain).
+   * so a raw view of the event can still show its extras. Nothing is dropped from result. `source`
+   * labels a webhook delivery vs a pull-feed row (null for the changes scenario, where every row is a
+   * pull-feed drain).
    */
   private projectChange(c: Change, source: 'webhook' | 'feed' | null): Record<string, unknown> {
     const at = c.at?.toISOString() ?? null;
@@ -522,7 +520,7 @@ export class CompanyDataHandler {
 /**
  * Render a decrypted value for JSON. A binary value is a lazy {@link BinaryHandle} — render a short
  * descriptor (its bytes are resolved lazily/async, not dumped into the result); a Date is ISO-8601; a
- * structured value stays an object/array (the frontend JSON-stringifies it).
+ * structured value stays an object/array so it remains valid JSON as-is.
  */
 function valueToJson(v: unknown): unknown {
   if (v === null || v === undefined) return null;

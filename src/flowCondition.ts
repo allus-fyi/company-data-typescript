@@ -45,7 +45,7 @@ export function evaluateCondition(condition: unknown, answers: Record<string, un
   if (op === 'empty') return !isAnswered(val);
   if (op === 'in') return Array.isArray(target) && target.some((x) => looseEq(x, val));
   if (op === 'nin') return !(Array.isArray(target) && target.some((x) => looseEq(x, val)));
-  // #102 substring ops (text): contains needs an answer (like in); not_contains is true when
+  // Substring ops (text): contains needs an answer (like in); not_contains is true when
   // unanswered (like nin). Case-sensitive; empty needle counts as contained.
   if (op === 'contains') return isAnswered(val) && str(val).includes(str(target));
   if (op === 'not_contains') return !(isAnswered(val) && str(val).includes(str(target)));
@@ -97,7 +97,7 @@ function str(v: unknown): string {
   return String(v);
 }
 
-// ── Flow constants (computed variables) — issue #79. Pure; extends the evaluator above. ──
+// ── Flow constants (computed variables). Pure; extends the evaluator above. ──────────────
 // Reuses the file's existing module-local helpers toNum / str / evaluateCondition WITHOUT
 // modifying them, so the 27-case condition vector stays byte-identical. A "constant" is
 // { key, label, result_type, expr }; computeConstants materialises each into a NEW slug->value
