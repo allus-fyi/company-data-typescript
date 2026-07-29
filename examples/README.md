@@ -8,8 +8,8 @@ A runnable demo of **everything the SDK does**, across three scenario families:
 - **Flow** — run a **contract flow** end-to-end: trigger it, drive the company party through it with
   type-checked step filling, hand a turn to the person's phone, then read the decrypted answers and
   (for the contract fixture) download the generated signed document.
-- **Company-data** — connections read, request-field catalog, the change feed, **webhooks**, and the
-  six document/contract types.
+- **Company-data** — connections read, request-field catalog, the change feed, **webhooks**, and
+  creating document/contract types (six offered, pick which to create).
 
 It is a thin backend implementing the shared **demo-backend contract (v3)**; most of the UI is the
 shared frontend bundle fetched from
@@ -130,7 +130,7 @@ portal (service settings → Flows → Import) and publish it.
 | `companydata:definitions` | `Client.requestFields()` | `{fields:[{slug,label,type,mandatory,one_time}]}` |
 | `companydata:changes` | `Client.processChanges()` | `{events:[…], drained:true}` — crash-safe pump drain, idempotent on `Change.id` |
 | `companydata:webhook` | `Client.verifyWebhook()` + `Client.parseWebhook()` (public `POST /webhook`) + `Client.drainBatch()` (feed fallback) | `{webhookId, events:[{source,…}], unparseable?}` — accumulating |
-| `companydata:documents` | `Client.createDocument()` ×6 | `{docs:[{index,label,document_id,status}]}` |
+| `companydata:documents` | `Client.createDocument()` per selected type (six offered, all ticked by default) | `{docs:[{index,label,document_id,status}]}` |
 
 ## Setting up a scenario (the portal)
 

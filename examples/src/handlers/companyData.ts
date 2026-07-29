@@ -16,7 +16,8 @@ import { headerValue, readRawBody, sendJson, sendText, str } from '../http.js';
  *   changes     — Client.processChanges()        → a crash-safe pump drain (idempotent on Change.id)
  *   webhook     — verifyWebhook() + parseWebhook() → a public POST /webhook receiver + a drainBatch()
  *                                                  feed fallback; ONE accumulating run keyed by webhook id
- *   documents   — Client.createDocument() ×6      → the six document/contract types
+ *   documents   — Client.createDocument()         → the document/contract types selected in setup
+ *                                                    (six offered, all ticked by default)
  *
  * Settings flow (config-file model): the browser POSTs a scenario's setup values to
  * POST /api/scenarios/{id}/config, which writes them to a canonical SDK config FILE
@@ -123,7 +124,14 @@ export class CompanyDataHandler {
       if (webhookId !== '' && secret !== '') cfg.webhooks = { [webhookId]: secret };
       if (webhookId !== '') meta.webhook_id = webhookId; // the routing key /start writes into the route
     }
-    if (id === DOCUMENTS) meta.share_code = str(in_.shareCode); // the per-person/contract target
+    if (id === DOCUMENTS) {
+      meta.share_code = str(in_.shareCode); // the per-person/contract target
+      // Preserve presence so doDocuments can distinguish an explicit empty selection from an
+      // absent selection; absence means all document types.
+      if (Object.prototype.hasOwnProperty.call(in_, 'documentTypes')) {
+        meta.document_types = (Array.isArray(in_.documentTypes) ? in_.documentTypes : []).map(String);
+      }
+    }
 
     const configPath = this.rt.writeConfig(id, cfg);
     this.rt.writeConfigMeta(id, meta);
@@ -231,31 +239,39 @@ export class CompanyDataHandler {
   }
 
   /**
-   * companydata:documents — Client.createDocument() for each of the six document/contract types (payloads
-   * verbatim from apitests/php/documents.php). The per-person / private / contract types target the
-   * connected person by share code (from the setup sidecar).
+   * companydata:documents — Client.createDocument() for each SELECTED document/contract type, of the six
+   * the scenario offers (payloads verbatim from apitests/php/documents.php). The per-person / private /
+   * contract types target the connected person by share code (from the setup sidecar). Selection comes
+   * from the sidecar's document_types list; absence means all six.
    */
   private async doDocuments(client: Client, calls: string[]): Promise<Record<string, unknown>> {
-    const shareCode = str(this.rt.readConfigMeta(DOCUMENTS).share_code);
+    const meta = this.rt.readConfigMeta(DOCUMENTS);
+    const shareCode = str(meta.share_code);
+    const hasTypes = Object.prototype.hasOwnProperty.call(meta, 'document_types');
+    const selectedTypes = Array.isArray(meta.document_types) ? meta.document_types.map(String) : [];
     const pdf = minimalPdf;
-    type Spec = { label: string; perPerson: boolean; opts: Parameters<Client['createDocument']>[0] };
+    type Spec = { key: string; label: string; perPerson: boolean; opts: Parameters<Client['createDocument']>[0] };
     const specs: Spec[] = [
       {
+        key: 'broadcast_json',
         label: 'Broadcast plaintext JSON (no target)',
         perPerson: false,
         opts: { name: 'Service notice', payloadKind: 'json', jsonValue: { msg: 'Scheduled maintenance Sunday' } },
       },
       {
+        key: 'broadcast_pdf',
         label: 'Broadcast PDF file (no target)',
         perPerson: false,
         opts: { name: 'Price list', payloadKind: 'file', fileBytes: pdf('Price list'), fileMime: 'application/pdf' },
       },
       {
+        key: 'per_person_file',
         label: 'Per-person NON-private file',
         perPerson: true,
         opts: { name: 'Your invoice', payloadKind: 'file', fileBytes: pdf('Your invoice'), fileMime: 'application/pdf' },
       },
       {
+        key: 'per_person_private',
         label: 'Per-person PRIVATE file (lock → reveal)',
         perPerson: true,
         opts: {
@@ -267,6 +283,7 @@ export class CompanyDataHandler {
         },
       },
       {
+        key: 'contract_signature',
         label: 'CONTRACT requiring SIGNATURE',
         perPerson: true,
         opts: {
@@ -280,6 +297,7 @@ export class CompanyDataHandler {
         },
       },
       {
+        key: 'contract_acceptance',
         label: 'CONTRACT requiring ACCEPTANCE',
         perPerson: true,
         opts: {
@@ -303,8 +321,10 @@ export class CompanyDataHandler {
     ];
 
     const docs: unknown[] = [];
-    for (let i = 0; i < specs.length; i++) {
-      const spec = specs[i];
+    for (const spec of specs) {
+      if (hasTypes && !selectedTypes.includes(spec.key)) {
+        continue; // deselected in setup — the scenario runs exactly what was chosen
+      }
       const opts = { ...spec.opts };
       if (spec.perPerson) {
         if (shareCode === '') {
@@ -316,7 +336,7 @@ export class CompanyDataHandler {
       }
       calls.push(CALL_CREATE_DOCUMENT.replace('{label}', spec.label));
       const doc = await client.createDocument(opts);
-      docs.push({ index: i + 1, label: spec.label, document_id: doc.id, status: doc.status });
+      docs.push({ index: docs.length + 1, label: spec.label, document_id: doc.id, status: doc.status });
     }
     return { docs };
   }
