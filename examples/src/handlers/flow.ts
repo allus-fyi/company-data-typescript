@@ -328,7 +328,8 @@ export class FlowHandler {
   ): Promise<RunRecord> {
     run.calls = addCall(run.calls, CALL_ANSWERS);
     const answers = await client.flowRunAnswers(flowRun);
-    run.answers = Object.entries(answers).map(([slug, value]) => ({ slug, value }));
+    const ciphers = ownCipherBySlug(flowRun);
+    run.answers = Object.entries(answers).map(([slug, value]) => ({ slug, value, cipher: ciphers[slug] ?? null }));
 
     if (flowRun.outputMode === 'document') {
       try {
@@ -377,6 +378,23 @@ export class FlowHandler {
   private serviceClient(): Client {
     return Client.fromConfig(this.rt.configPathFor(SCENARIO));
   }
+}
+
+/**
+ * The company's own answer rows, keyed by slug and left as the still-encrypted wrapper the API
+ * returned — the evidence the "Decrypted answers" panel pairs against each cleartext value, so a
+ * reader can see the decrypt actually ran on real ciphertext rather than take it on faith.
+ */
+function ownCipherBySlug(flowRun: FlowRun): Record<string, unknown> {
+  const serviceUid = flowRun.serviceUserId;
+  const out: Record<string, unknown> = {};
+  for (const row of flowRun.answers) {
+    const slug = row['slug'];
+    if (typeof slug === 'string' && row['for_user_id'] === serviceUid) {
+      out[slug] = row['value'] ?? null;
+    }
+  }
+  return out;
 }
 
 /** A canned VALID plaintext for a field type (demo values over already-supported answerable types). */
