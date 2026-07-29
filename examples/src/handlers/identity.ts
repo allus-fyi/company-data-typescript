@@ -46,6 +46,14 @@ const SCENARIOS: Record<number, 'runnable' | 'guide'> = {
 
 /** Scenarios that also read live values through the service data {@link Client} (service-role keys). */
 const SERVICE_SCENARIOS = new Set([4, 8]);
+/**
+ * Scenarios whose {@link OAuthClient.completeSignIn} response can carry claim values (userinfo `values`
+ * non-empty) and therefore need the OAuth app private key configured to decrypt them: mode one_time and
+ * mode connect, both delivered as app-key ciphertext through userinfo. Mode signin (scenarios 1, 2) never
+ * carries values; scenario 8 never calls this leg at all; scenarios 5/6 run the openid-client library
+ * instead of this SDK's decrypt path.
+ */
+const CLAIM_VALUE_SCENARIOS = new Set([3, 4]);
 /** Scenarios that build an OAuth consent URL via {@link OAuthClient} (need the authorize base). */
 const OAUTH_URL_SCENARIOS = new Set([1, 2, 3, 4, 8]);
 
@@ -97,7 +105,7 @@ const CALL_COMPLETE_SIGNIN =
 const CALL_COMPLETE_ONE_TIME =
   'OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key';
 const CALL_COMPLETE_CONNECT =
-  'OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below';
+  "OAuthClient.completeSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts the consented claim values with the OAuth app private key; the connection's live values still come separately from the data client below";
 const CALL_ENROLLED_CALLBACK =
   '(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call';
 const CALL_SERVICE_BUILD =
@@ -153,8 +161,9 @@ export class IdentityHandler {
     const secret = str(in_.oauthClientSecret);
     if (secret !== '') cfg.oauth_client_secret = secret;
 
-    // Scenario 3 (one_time): the OAuth app private key decrypts the claim values (config-only keys).
-    if (id === 3) {
+    // Any scenario whose run can carry claim values (CLAIM_VALUE_SCENARIOS) needs the OAuth app
+    // private key to decrypt them (config-only keys).
+    if (CLAIM_VALUE_SCENARIOS.has(id)) {
       const pem = str(in_.oauthPrivateKeyPem);
       if (pem !== '') cfg.oauth_private_key = this.rt.materializeConfigKey(pem);
       const pass = str(in_.oauthKeyPassphrase);
