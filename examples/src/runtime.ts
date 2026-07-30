@@ -30,6 +30,8 @@ import { join } from 'node:path';
  *   - config/keys/<sha1>.pem  — the private-key file(s) a config references by path (mode 0600)
  *   - runs/{runId}.json       — one run's PKCE/state/nonce/outcome or accumulated result + calls
  *   - webhook-route.json      — the SINGLE active company-data webhook run: {webhookId, runId}
+ *   - state.json              — the setup snapshot POSTed to /api/state, held verbatim as OPAQUE cold
+ *                               storage: never parsed here, never used to run anything
  *   - cache/                  — the SDK pump's buffer + dead-letter dir (Config.cacheDir), wiped by Clear
  *
  * {@link sid} is a filesystem-safe token of the scenario's public id (e.g. "companydata:read" →
@@ -57,6 +59,7 @@ export class Runtime {
   /** The SDK pump's buffer + dead-letter dir (Config.cacheDir → this path), wiped by Clear / startup. */
   readonly cacheDir: string;
   readonly routePath: string;
+  readonly statePath: string;
 
   constructor(baseDir: string) {
     this.runtimeDir = join(baseDir, '.runtime');
@@ -65,6 +68,7 @@ export class Runtime {
     this.configKeysDir = join(this.configDir, 'keys');
     this.cacheDir = join(this.runtimeDir, 'cache');
     this.routePath = join(this.runtimeDir, 'webhook-route.json');
+    this.statePath = join(this.runtimeDir, 'state.json');
   }
 
   /** Filesystem-safe token for a scenario id (e.g. "companydata:read" → "companydata_read", "1" → "1"). */
@@ -219,6 +223,34 @@ export class Runtime {
     this.tryUnlink(this.routePath);
   }
 
+  // ── the setup snapshot (POST/GET /api/state) ─────────────────────────────
+
+  /**
+   * Store the setup snapshot the request carried, VERBATIM. The bytes are OPAQUE here — never parsed,
+   * never inspected, never used to run anything — so nothing in this class constrains what they may
+   * contain, and an empty body is a snapshot like any other. They stay a `Buffer` end to end: decoding
+   * to a string and back would re-encode content this store is not allowed to interpret. Carries no
+   * TTL (it is setup, not a run); removed by a global clear or the startup wipe.
+   */
+  writeState(blob: Buffer): void {
+    this.ensureDirs();
+    this.atomicWrite(this.statePath, blob);
+  }
+
+  /**
+   * The stored snapshot's bytes, or null when NO snapshot file exists — the file's presence is the
+   * whole of the answer, since judging the content would be the inspection this store does not do. A
+   * file that exists but cannot be read throws, because that is a fault rather than an absence.
+   */
+  readState(): Buffer | null {
+    if (!existsSync(this.statePath)) return null;
+    return readFileSync(this.statePath);
+  }
+
+  clearState(): void {
+    this.tryUnlink(this.statePath);
+  }
+
   // ── clear ─────────────────────────────────────────────────────────────────
 
   /**
@@ -242,12 +274,17 @@ export class Runtime {
     this.ensureDirs();
   }
 
-  /** Global clear: wipe all run files, the config tree (configs, metas, keys), the route + pump cache. */
+  /**
+   * Global clear: wipe all run files, the config tree (configs, metas, keys), the route + pump cache,
+   * and the saved setup snapshot. The snapshot goes too because it can hold the same credentials the
+   * config tree does — a clear that left it behind would leave those sitting on disk.
+   */
   clearAll(): void {
     for (const name of this.list(this.runsDir)) this.tryUnlink(join(this.runsDir, name));
     rmSync(this.configDir, { recursive: true, force: true });
     rmSync(this.cacheDir, { recursive: true, force: true });
     this.clearRoute();
+    this.clearState();
     this.ensureDirs();
   }
 
@@ -276,8 +313,11 @@ export class Runtime {
 
   // ── helpers ─────────────────────────────────────────────────────────────
 
-  /** Write-temp + atomic rename on the same filesystem (crash hygiene: no partial reads). */
-  private atomicWrite(finalPath: string, contents: string, mode?: number): void {
+  /**
+   * Write-temp + atomic rename on the same filesystem (crash hygiene: no partial reads). Accepts a
+   * `Buffer` as well as a string, so bytes that must not be re-encoded can be written as they are.
+   */
+  private atomicWrite(finalPath: string, contents: string | Buffer, mode?: number): void {
     const tmp = `${finalPath}.${randomBytes(4).toString('hex')}.tmp`;
     writeFileSync(tmp, contents, mode !== undefined ? { mode } : undefined);
     if (mode !== undefined) chmodSync(tmp, mode);

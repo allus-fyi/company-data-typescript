@@ -66,6 +66,16 @@ export function sendFailure(res: ServerResponse, reason: unknown, token = 'serve
   sendJson(res, { error: `${token} — ${shown}`, message: text }, status);
 }
 
+/**
+ * Serve a JSON document that is already encoded, byte for byte — the stored setup snapshot. The bytes
+ * are passed through as they are because parsing and re-serialising them here, or decoding them to a
+ * string and back, would rewrite content this server is not allowed to interpret.
+ */
+export function sendRawJson(res: ServerResponse, blob: Buffer, status = 200): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(blob);
+}
+
 export function sendText(res: ServerResponse, body: string, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end(body);

@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { Runtime, type RunRecord } from './runtime.js';
-import { readJsonBody, sendFailure, sendJson, serveStatic } from './http.js';
+import { readJsonBody, readRawBody, sendFailure, sendJson, sendRawJson, serveStatic } from './http.js';
 import { IdentityHandler } from './handlers/identity.js';
 import { FlowHandler } from './handlers/flow.js';
 import { CompanyDataHandler } from './handlers/companyData.js';
@@ -70,6 +70,15 @@ export class Server {
       } else if (path === '/api/clear' && method === 'POST') {
         this.rt.clearAll();
         sendJson(res, { ok: true });
+      } else if (path === '/api/state' && method === 'POST') {
+        // The setup snapshot, stored verbatim; the bytes are never inspected or decoded here.
+        this.rt.writeState(await readRawBody(req));
+        sendJson(res, { ok: true });
+      } else if (path === '/api/state' && method === 'GET') {
+        // Handed back exactly as stored; no snapshot file at all → 404 not_found.
+        const blob = this.rt.readState();
+        if (blob === null) sendJson(res, { error: 'not_found' }, 404);
+        else sendRawJson(res, blob);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/config$/)) && method === 'POST') {
         await this.dispatchConfig(m[1], host, req, res);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/start$/)) && method === 'POST') {
