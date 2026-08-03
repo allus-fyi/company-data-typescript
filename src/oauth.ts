@@ -106,6 +106,14 @@ export interface SignInResult {
   /** Claim name → plaintext. */
   values: Record<string, string>;
   /**
+   * Claim name → the RAW app-key ciphertext wrapper `values` was decrypted from — an ADDITIVE
+   * sibling of {@link values}, keyed the same way, exactly as delivered by userinfo. Lets a caller
+   * demonstrate that a plaintext value really came from encrypted delivery. Empty for a mode/claim
+   * that carries no ciphertext (signin mode, or plaintext delivery) — that absence is the honest
+   * answer, never a placeholder.
+   */
+  values_cipher: Record<string, unknown>;
+  /**
    * Claim name → {@link Attestation}, keyed by the SAME slug as {@link values} (§3.1a).
    * Additive: an integration that never reads it behaves exactly as before. ABSENT = not attested.
    */
@@ -228,11 +236,13 @@ export class OAuthClient {
       mode: (info.mode as string | undefined) ?? (token.mode as string | undefined),
       two_factor: Boolean(info.two_factor),
       values: {},
+      values_cipher: {},
       attestations: {},
     };
     const rawValues = info.values as Record<string, EncWrapper | string> | undefined;
     if (rawValues && Object.keys(rawValues).length > 0) {
       result.values = this.decryptValues(rawValues);
+      result.values_cipher = rawValues;
       const rawAttest = info.values_attestation as Record<string, EncWrapper | string> | undefined;
       if (rawAttest && Object.keys(rawAttest).length > 0) {
         result.attestations = this.decryptAttestations(rawAttest, result.values);
