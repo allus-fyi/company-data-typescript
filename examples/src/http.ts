@@ -27,6 +27,27 @@ const MIME: Record<string, string> = {
   '.webp': 'image/webp',
 };
 
+/**
+ * Register the connection-level guard for a response socket that can be aborted or superseded mid-write
+ * (the frontend's poll fetch is the common case). Node emits an `'error'` event on the response when the
+ * underlying socket resets (`ECONNRESET`) or the pipe closes (`EPIPE`) during a write; with no listener
+ * attached, Node's default behaviour is to throw it as an uncaught exception, which — with no
+ * process-level `uncaughtException` handler present — crashes the single-worker process for one dropped
+ * client rather than the response that was actually affected. Only those two disconnect codes are
+ * isolated here; any other response error is a real fault this guard must not disguise as a dropped
+ * client, so it is reported distinctly and re-raised rather than swallowed.
+ */
+export function guardResponseSocket(res: ServerResponse): void {
+  res.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'ECONNRESET' || err.code === 'EPIPE') {
+      process.stderr.write(`example-suite: client disconnected during write (${err.code})\n`);
+      return;
+    }
+    process.stderr.write(`example-suite: unexpected response error (${err.code ?? err.message})\n`);
+    throw err;
+  });
+}
+
 export function sendJson(res: ServerResponse, data: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));

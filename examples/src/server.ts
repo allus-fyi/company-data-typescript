@@ -1,7 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { Runtime, type RunRecord } from './runtime.js';
-import { readJsonBody, readRawBody, sendFailure, sendJson, sendRawJson, serveStatic } from './http.js';
+import {
+  guardResponseSocket,
+  readJsonBody,
+  readRawBody,
+  sendFailure,
+  sendJson,
+  sendRawJson,
+  serveStatic,
+} from './http.js';
 import { IdentityHandler } from './handlers/identity.js';
 import { FlowHandler } from './handlers/flow.js';
 import { CompanyDataHandler } from './handlers/companyData.js';
@@ -42,6 +50,10 @@ export class Server {
   // ── entry point ────────────────────────────────────────────────────────
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // A superseded or aborted client (the frontend's poll fetch is the common case) can close its
+    // socket while a write is in flight; register the connection-level guard before any write is
+    // attempted so that failure is reported, not thrown as an uncaught exception.
+    guardResponseSocket(res);
     // EVERYTHING is inside the guard — request PREPROCESSING included. Setup and
     // parsing throw as readily as a handler does: `this.rt.ensureDirs()` on an unwritable `.runtime/`,
     // and `decodeURIComponent` on a malformed percent-escape (`GET /api/scenarios/5/start%` → Node hands
