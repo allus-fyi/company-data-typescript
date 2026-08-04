@@ -991,6 +991,16 @@ The sign-in result carries `values`, `values_cipher` **and** `attestations`.
   **an entry present with `verified` false is a MISMATCH and you must reject the value.** The timestamp
   attests the value as verified *at that moment*, not verified today.
 
+**`resolveUserinfo(accessToken, fallbackMode?)`** is the second half of `completeSignIn` — the `userinfo`
+read + decrypt + attest, without the token exchange — for a caller whose exchange already ran through a
+different client (a standards-only third-party OIDC library, say, that verified the id_token itself but
+cannot read a claim value the id_token never carries). Config-only key handling applies exactly as it does
+to `completeSignIn`: you pass no key or passphrase, only the access token you already hold. Returns the
+identical shape (`values`, `values_cipher`, `attestations`) and carries the same mismatch-rejection duty on
+the caller. `completeSignIn` is implemented on top of this method. `fallbackMode` is used only when
+`userinfo` itself omits `mode` — pass the mode your own token response carried, or omit it if you have
+none.
+
 
 ## 2FA by allme (#436, #481)
 

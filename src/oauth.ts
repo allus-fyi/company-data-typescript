@@ -227,13 +227,27 @@ export class OAuthClient {
     if (!accessToken || typeof accessToken !== 'string') {
       throw new AuthError('token exchange returned no access_token');
     }
+    return this.resolveUserinfo(accessToken, token.mode as string | undefined);
+  }
+
+  /**
+   * Read + decrypt userinfo for an access token ALREADY held — the second half of
+   * {@link completeSignIn}, split out so a caller that obtained its access token through its own
+   * separate exchange can still resolve and decrypt the claim values. Config-only key handling
+   * still holds — the caller passes no key/passphrase, only the token it already has; the private
+   * key is read from `Config` exactly as {@link completeSignIn} does.
+   *
+   * Re-exchanging the code here would be wrong (a second exchange either mints a second grant or
+   * fails outright), so this method never does the exchange — only the read + decrypt.
+   */
+  async resolveUserinfo(accessToken: string, fallbackMode?: string): Promise<SignInResult> {
     const info = await this.userinfo(accessToken);
     const result: SignInResult = {
       user: {
         sub: info.sub as string | undefined,
         share_code: info.share_code as string | undefined,
       },
-      mode: (info.mode as string | undefined) ?? (token.mode as string | undefined),
+      mode: (info.mode as string | undefined) ?? fallbackMode,
       two_factor: Boolean(info.two_factor),
       values: {},
       values_cipher: {},
