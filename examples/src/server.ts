@@ -97,6 +97,8 @@ export class Server {
         await this.dispatchStart(m[1], host, res);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/enroll$/)) && method === 'POST') {
         await this.dispatchEnroll(m[1], req, res);
+      } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/cleanup$/)) && method === 'POST') {
+        await this.companyData.cleanup(m[1], res); // company-data-only (companydata:documents)
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/clear$/)) && method === 'POST') {
         this.dispatchClearScenario(m[1], res);
       } else if ((m = path.match(/^\/api\/runs\/([0-9a-f]{32})$/)) && method === 'GET') {

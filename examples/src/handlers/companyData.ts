@@ -62,6 +62,9 @@ const CALL_REQUEST_FIELDS =
 const CALL_PROCESS_CHANGES =
   'Client.processChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store';
 const CALL_CREATE_DOCUMENT = 'Client.createDocument — {label}';
+const CALL_LIST_DOCUMENTS =
+  "Client.listDocuments — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created";
+const CALL_DELETE_DOCUMENT = 'Client.deleteDocument — DELETE /api/company-data/documents/{id}';
 const CALL_WEBHOOK_STARTED =
   '(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback';
 const CALL_VERIFY_WEBHOOK =
@@ -339,6 +342,46 @@ export class CompanyDataHandler {
       docs.push({ index: docs.length + 1, label: spec.label, document_id: doc.id, status: doc.status });
     }
     return { docs };
+  }
+
+  // ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ─────────
+
+  /**
+   * Delete every document the documents scenario has created on this service, so a reused
+   * account can reset between runs — companydata:documents is additive (createDocument mints a
+   * new document each run; nothing deletes a prior run's). Not part of the generic dispatch:
+   * routed directly by the server, the same way /enroll is identity-only.
+   */
+  async cleanup(id: string, res: ServerResponse): Promise<void> {
+    if (id !== DOCUMENTS) return sendJson(res, { error: 'not_found' }, 404);
+    if (!this.rt.hasConfig(id)) return sendJson(res, { error: 'not_configured' }, 409);
+
+    const runId = this.rt.newRunId();
+    const calls: string[] = [];
+    try {
+      calls.push(CALL_SERVICE_BUILD);
+      const client = Client.fromConfig(this.rt.configPathFor(id));
+      const result = await this.doCleanupDocuments(client, calls);
+      this.rt.writeRun(runId, { scenario: id, status: 'done', result, calls });
+    } catch (e) {
+      this.rt.writeRun(runId, { scenario: id, status: 'failed', error: (e as Error).message, calls });
+    }
+    sendJson(res, { runId, action: { type: 'data' } });
+  }
+
+  private async doCleanupDocuments(client: Client, calls: string[]): Promise<Record<string, unknown>> {
+    let deleted = 0;
+    for (;;) {
+      calls.push(CALL_LIST_DOCUMENTS);
+      const page = await client.listDocuments({ limit: 100, offset: 0 });
+      if (page.length === 0) break;
+      for (const doc of page) {
+        calls.push(CALL_DELETE_DOCUMENT.replace('{id}', doc.id));
+        await client.deleteDocument(doc.id);
+        deleted++;
+      }
+    }
+    return { deleted };
   }
 
   // ── companydata:webhook — the accumulating run + public receiver ──────────
