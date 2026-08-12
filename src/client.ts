@@ -71,6 +71,7 @@ const REQUEST_FIELDS = `${BASE}/request-fields`;
 const LOGS = `${BASE}/logs`;
 const DOCUMENTS = `${BASE}/documents`;
 const CONNECT_REQUESTS = `${BASE}/connect-requests`;
+const BROADCAST = `${BASE}/broadcast`; // POST — one plaintext message to every connection
 const FLOWS = `${BASE}/flows`; // POST /api/company-data/flows/{flowId}/runs
 const FLOW_RUNS = `${BASE}/flow-runs`; // list / get / answers / generate
 const KEYS = '/api/keys';
@@ -805,6 +806,98 @@ export class Client {
     return rid;
   }
 
+  // ── messaging (company ↔ person) ─────────────────────────────────────────────
+
+  /**
+   * Send a 1-on-1 message to the connected person → the new `message_id`.
+   *
+   * `POST /api/company-data/connections/{connectionId}/messages`. The message is
+   * end-to-end encrypted before it leaves the process: one copy for the PERSON
+   * (`body`) and one for the SERVICE (`sender_body`), so the person reads it in their
+   * app and this service can re-read its own outbound text. The platform stores
+   * ciphertext only. The route answers 201 with the created message carrying
+   * `message_id` — the acknowledgement boundary {@link markMessagesRead} takes.
+   *
+   * `personPublicKey` is the base64 SPKI carried on the `message_received` event —
+   * pass it to answer without a second key lookup. Without it the key is resolved
+   * from the connection's `share_code` (or an explicit `shareCode`). Config-only key
+   * handling is unchanged: a recipient PUBLIC key is neither a secret nor a
+   * configured key.
+   *
+   * Refusals arrive as {@link ApiError} with the platform `error_key`:
+   * `messages.messaging_not_entitled` / `messages.messaging_suspended` /
+   * `messages.not_connected` (403), `messages.encryption_required` (400),
+   * `messages.rate_limited` (429).
+   */
+  async sendMessage(
+    connectionId: string,
+    text: string,
+    opts: { personPublicKey?: string; shareCode?: string } = {},
+  ): Promise<string> {
+    const cid = (connectionId ?? '').trim();
+    if (!cid) throw new ConfigError('connectionId is required');
+    const plain = text ?? '';
+    if (!plain.trim()) throw new ConfigError('text is required');
+
+    const personKey = opts.personPublicKey
+      ? loadPublicKey(opts.personPublicKey)
+      : await this.recipientPublicKey(opts.shareCode ?? (await this.resolveShareCode(cid, undefined)));
+
+    const body = {
+      // Both copies travel as JSON STRINGS — the message columns are text and the API
+      // tells ciphertext from plaintext by looking for the wrapper marker.
+      body: JSON.stringify(encryptForPublicKey(plain, personKey)),
+      sender_body: JSON.stringify(encryptForPublicKey(plain, this.servicePublicKey())),
+    };
+    const res = await this.http.post(`${CONNECTIONS}/${cid}/messages`, { json: body });
+    const mid = messageIdOf(res);
+    if (!mid) throw new ApiError(0, 'messages.send_failed', 'no message_id in response');
+    return mid;
+  }
+
+  /**
+   * Send one PLAINTEXT message to every person connected to this service.
+   *
+   * `POST /api/company-data/broadcast`. A broadcast is deliberately not encrypted —
+   * one body cannot be single-key-encrypted to every connection — so it is the one
+   * message the platform can read, exactly as a broadcast document is. It seeds each
+   * recipient's ordinary 1-on-1 thread, and a reply comes back end-to-end encrypted
+   * as a `message_received` event.
+   *
+   * Resolves to the API response. Refusals arrive as {@link ApiError}:
+   * `messages.broadcast_audience_too_large` (422, over the connection cap),
+   * `messages.broadcast_suspended` / `messages.messaging_suspended` /
+   * `messages.messaging_not_entitled` (403).
+   */
+  async broadcastMessage(text: string): Promise<unknown> {
+    const plain = text ?? '';
+    if (!plain.trim()) throw new ConfigError('text is required');
+    return this.http.post(BROADCAST, { json: { body: plain } });
+  }
+
+  /**
+   * Acknowledge the inbound messages you have handled, up to a boundary.
+   *
+   * `POST /api/company-data/connections/{connectionId}/messages/read` with
+   * `{up_to_message_id}`. Only the person's messages on THIS connection at or before
+   * that message are marked read; one that arrived while you were working stays
+   * unread, so nothing is swept unhandled. Idempotent — a repeat is a no-op.
+   *
+   * Sending a reply does NOT acknowledge anything; a service that never acks lets its
+   * unread grow. The boundary must be a message the PERSON sent on this connection:
+   * anything else is refused with {@link ApiError}
+   * `company_data.ack_boundary_invalid` (400).
+   */
+  async markMessagesRead(connectionId: string, upToMessageId: string): Promise<void> {
+    const cid = (connectionId ?? '').trim();
+    if (!cid) throw new ConfigError('connectionId is required');
+    const boundary = (upToMessageId ?? '').trim();
+    if (!boundary) throw new ConfigError('upToMessageId is required');
+    await this.http.post(`${CONNECTIONS}/${cid}/messages/read`, {
+      json: { up_to_message_id: boundary },
+    });
+  }
+
   // ── contract-flow runs (company side — the company is a bound party) ─────────
 
   /**
@@ -1171,6 +1264,20 @@ function dataUri(fileBytes: Buffer, mime: string | undefined): string {
 }
 
 /** Allowed broadcast-document MIME → file extension (mirrors the API's allowlist). */
+/**
+ * Pull the new message's id out of a send response — at the top level or nested
+ * under `message`, and under either `message_id` or `id`.
+ */
+function messageIdOf(body: unknown): string | null {
+  let obj = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const inner = obj['message'];
+  if (inner !== null && typeof inner === 'object' && !Array.isArray(inner)) {
+    obj = inner as Record<string, unknown>;
+  }
+  const mid = obj['message_id'] ?? obj['id'];
+  return mid != null && String(mid) !== '' ? String(mid) : null;
+}
+
 const MIME_EXT: Record<string, string> = {
   'application/pdf': 'pdf',
   'application/msword': 'doc',

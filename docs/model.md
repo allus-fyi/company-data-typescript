@@ -121,6 +121,10 @@ class Change {
   slug: string | null;        // field_updated/field_deleted/consent_* only
   value: unknown;             // field_updated only; typed exactly like Value.value
   live: boolean | null;       // field_updated only
+  connectionId: string | null;      // message_received only
+  messageId: string | null;         // message_received only — the ack boundary
+  personPublicKey: string | null;   // message_received only — base64 SPKI for the reply
+  messageBody: string | null;       // message_received only — the DECRYPTED text
   at: Date | null;            // the change time (no separate updatedAt on a change)
   raw: Record<string, unknown>;
 }
@@ -135,6 +139,14 @@ class Change {
 | `field_updated` | `slug` + decrypted `value` (+ `live`); binary → a lazy `BinaryHandle` |
 | `field_deleted` | `slug`, no value |
 | `consent_accepted` / `consent_declined` | `slug` |
+| `message_received` | `connectionId`, `messageId`, `personPublicKey` + `messageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
+
+The event's ciphertext is carried under `body`. It is never `value`: on every other
+event `value` means field ciphertext, and a message body is not one.
+
+**Answering one.** `sendMessage` answers **201** with the created message carrying
+`message_id`, which is what it returns — hand that id, or the inbound event's `messageId`,
+to `markMessagesRead` as the acknowledgement boundary.
 
 `Change.id` is captured before the server's drain-delete, so it survives a crash +
 replay unchanged — dedup on it.

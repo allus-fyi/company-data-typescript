@@ -319,6 +319,14 @@ export class Change {
     readonly customerType: string | null,
     /** Set on `key_rotated` — SHA-256 fingerprint of the person's NEW public key (else null). */
     readonly publicKeySha256: string | null,
+    /** Set on `message_received` — the connection to reply / acknowledge on (else null). */
+    readonly connectionId: string | null,
+    /** Set on `message_received` — the ack boundary (`upToMessageId`) (else null). */
+    readonly messageId: string | null,
+    /** Set on `message_received` — base64 SPKI to encrypt the reply to (else null). */
+    readonly personPublicKey: string | null,
+    /** Set on `message_received` — the DECRYPTED message text (else null). */
+    readonly messageBody: string | null,
     /** True iff a field_updated value is verified (hash matches the decrypted plaintext). */
     readonly verified: boolean,
     readonly at: Date | null,
@@ -344,6 +352,18 @@ export class Change {
           decryptValue: opts.decryptValue,
           binaryFetch: opts.binaryFetch,
         });
+      }
+    }
+
+    const isMessage = event === 'message_received';
+    let messageBody: string | null = null;
+    if (isMessage) {
+      // The message ciphertext is carried under `body`, never `value`: on every other
+      // event `value` means field ciphertext, which a message body is not. It is
+      // encrypted for the SERVICE key, so the ordinary decrypt opens it.
+      const cipher = obj['body'];
+      if (cipher !== undefined && cipher !== null) {
+        messageBody = opts.decryptValue(cipher as EncWrapper | string);
       }
     }
 
@@ -385,6 +405,10 @@ export class Change {
       event === 'key_rotated' && obj['public_key_sha256'] != null
         ? String(obj['public_key_sha256'])
         : null,
+      isMessage && obj['connection_id'] != null ? String(obj['connection_id']) : null,
+      isMessage && obj['message_id'] != null ? String(obj['message_id']) : null,
+      isMessage && obj['person_public_key'] != null ? String(obj['person_public_key']) : null,
+      messageBody,
       verifiedFrom(obj, value),
       parseIsoDate(obj['at']),
       obj,
