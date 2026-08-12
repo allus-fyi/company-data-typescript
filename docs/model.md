@@ -13,9 +13,11 @@ Returned by `client.requestFields()`.
 class RequestField {
   slug: string;        // the stable, company-set key — the contract for value access
   label: string;       // the human label (rename freely; the slug stays)
-  type: string;        // email|phone|url|text|address|bank|creditcard|date|date_of_birth|photo|document|legal_document
+  type: string;        // email|phone|url|text|address|bank|creditcard|date|date_of_birth|photo|document|legal_document|passport|photo_id|drivers_license
   oneTime: boolean;    // a one-time snapshot vs a live (auto-updating) answer
   mandatory: boolean;  // mandatory-to-provide OR mandatory-to-stay-connected (the API's two flags, folded)
+  verified: boolean;   // this row DEMANDS a verified answer (mutually exclusive with oneTime)
+  verifiedMaxAgeDays: number | null;  // oldest verification accepted; null = no age limit
   raw: Record<string, unknown>;
 }
 ```
@@ -50,6 +52,9 @@ class Value {
   value: unknown;            // typed plaintext (see below)
   live: boolean;             // true = "keep connected" (auto-updates); false = one-time snapshot
   updatedAt: Date | null;    // when this answer last changed
+  verified: boolean;         // the hash recomputes over the plaintext AND the verification has not lapsed
+  verifiedAt: Date | null;        // when the answering field was verified
+  verifiedExpiresAt: Date | null; // when that verification lapses; null = it does not
   raw: Record<string, unknown>;
 }
 ```
@@ -61,7 +66,7 @@ class Value {
 | `email`, `phone`, `url`, `text` | `string` | The decrypted plaintext. |
 | `address`, `bank`, `creditcard` | `object` | The decrypted plaintext is a JSON object → parsed. A non-JSON structured value throws `DecryptError`. |
 | `date`, `date_of_birth` | `Date` | Parsed from ISO `YYYY-MM-DD` (UTC midnight, the leading 10 chars); falls back to the raw string if unparseable. |
-| `photo`, `document`, `legal_document` | `BinaryHandle` | Lazy — nothing fetched/decrypted until `.bytes()`/`.save()`. |
+| `photo`, `document`, `legal_document`, `passport`, `photo_id`, `drivers_license` | `BinaryHandle` | Lazy — nothing fetched/decrypted until `.bytes()`/`.save()`. The last three are ID-document subtypes of `legal_document` and share its envelope. |
 | unanswered / no value | `null` | The slot has no answer. |
 
 ## `BinaryHandle`
@@ -125,6 +130,9 @@ class Change {
   messageId: string | null;         // message_received only — the ack boundary
   personPublicKey: string | null;   // message_received only — base64 SPKI for the reply
   messageBody: string | null;       // message_received only — the DECRYPTED text
+  verified: boolean;          // field_updated only; hash recomputes AND the verification has not lapsed
+  verifiedAt: Date | null;        // when the answering field was verified
+  verifiedExpiresAt: Date | null; // when that verification lapses; null = it does not
   at: Date | null;            // the change time (no separate updatedAt on a change)
   raw: Record<string, unknown>;
 }

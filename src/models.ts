@@ -5,9 +5,9 @@
  * that turn a *hardened* API JSON object (slug-keyed `values`; NO person source
  * field) into typed objects, decrypting ciphertext via the injected crypto closures.
  *
- *     RequestField { slug, label, type, oneTime, mandatory }   // YOUR request config
+ *     RequestField { slug, label, type, oneTime, mandatory, verified, verifiedMaxAgeDays }
  *     Connection   { id, personId, displayName, connectedAt, values: {<slug>: Value} }
- *     Value        { value, live, updatedAt }
+ *     Value        { value, live, updatedAt, verified, verifiedAt, verifiedExpiresAt }
  *     Change       { id, event, personId, shareCode?, slug?, value?, live?, at }   // id = stable dedup key
  *     LogEntry     { type, message, metadata, at }
  *
@@ -17,7 +17,8 @@
  *     JSON object string → parsed)
  *   - `date`/`date_of_birth`         → a JS `Date` (UTC midnight; falls back to the
  *     raw string if it can't be parsed)
- *   - `photo`/`document`/`legal_document` → a lazy {@link BinaryHandle}
+ *   - `photo`/`document`/`legal_document` and the ID-document subtypes
+ *     `passport`/`photo_id`/`drivers_license` → a lazy {@link BinaryHandle}
  *     (`.bytes()` fetches the slot file endpoint, decrypts, parses the envelope,
  *     base64-decodes the `full`/`file` data URI)
  *
@@ -33,8 +34,18 @@ import { BinaryHandle, DecryptError, type BinaryFetch, type DecryptWrapper, type
 
 /** Field types whose decrypted plaintext is a JSON object → a parsed object. */
 export const STRUCTURED_TYPES = ['address', 'bank', 'creditcard'] as const;
-/** Field types whose value is a lazy binary handle (served as a value_url). */
-export const BINARY_TYPES = ['photo', 'document', 'legal_document'] as const;
+/**
+ * Field types whose value is a lazy binary handle (served as a value_url) — the ID-document
+ * subtypes are children of `legal_document` and share its envelope.
+ */
+export const BINARY_TYPES = [
+  'photo',
+  'document',
+  'legal_document',
+  'passport',
+  'photo_id',
+  'drivers_license',
+] as const;
 /** Field types whose decrypted plaintext is an ISO date. */
 export const DATE_TYPES = ['date', 'date_of_birth'] as const;
 
@@ -49,6 +60,27 @@ function parseIsoDate(value: unknown): Date | null {
   const ms = Date.parse(raw);
   if (Number.isNaN(ms)) return null;
   return new Date(ms);
+}
+
+/**
+ * Whether a verification expiry stamp has already passed.
+ *
+ * Absent → `false`: a verification with no expiry never lapses. Present but unparseable →
+ * `true`: an expiry that cannot be evaluated cannot be used to claim the value is still
+ * verified today.
+ */
+export function expiryPassed(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return false;
+  const ms = Date.parse(String(value));
+  if (Number.isNaN(ms)) return true;
+  return ms <= Date.now();
+}
+
+/** Coerce a JSON number or an XML numeric string into an integer, or null. */
+function coerceInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(String(value).trim());
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
 function coerceBool(value: unknown): boolean | null {
@@ -95,6 +127,17 @@ export class RequestField {
     readonly mandatory: boolean,
     /** Which customer TYPE this row applies to: "person" | "company" | "both" (B2B); null on older API. */
     readonly audience: string | null,
+    /**
+     * This row DEMANDS a verified answer: only a value the person verified satisfies it, and an
+     * unverified candidate is refused at the accepting act rather than downgraded.
+     */
+    readonly verified: boolean,
+    /**
+     * The oldest verification the demand accepts, in days; null = no age limit. Enforced at the
+     * accepting act only — a standing live link is not re-enforced afterwards, so apply your own
+     * policy from each {@link Value.verifiedAt}.
+     */
+    readonly verifiedMaxAgeDays: number | null,
     readonly raw: Json,
   ) {}
 
@@ -106,6 +149,8 @@ export class RequestField {
       Boolean(coerceBool(obj['one_time'])),
       Boolean(coerceBool(obj['mandatory_provide']) || coerceBool(obj['mandatory_connected'])),
       obj['audience'] != null ? String(obj['audience']) : null,
+      Boolean(coerceBool(obj['verified'])),
+      coerceInt(obj['verified_max_age_days']),
       obj,
     );
   }
@@ -127,12 +172,20 @@ export class RequestField {
  * `updatedAt` = when this answer last changed. Both ride on the Value (per-answer),
  * not the definition.
  */
-/** Recompute the verified flag from the just-decrypted plaintext (email string only). */
+/**
+ * Recompute the verified flag from the just-decrypted plaintext (text values only).
+ *
+ * Two conditions, both required: the hash recomputes over the exact plaintext, AND the
+ * verification has not lapsed (`verified_expires_at` absent or still in the future). A
+ * document-backed verification lapses when the document itself expires, so a stale binding reads
+ * false here without any lookup.
+ */
 function verifiedFrom(obj: Json, plaintext: unknown): boolean {
   if (typeof plaintext !== 'string') return false;
   const vhash = obj['verified_hash'];
   const vsalt = obj['verified_salt'];
   if (typeof vhash !== 'string' || typeof vsalt !== 'string' || !vhash || !vsalt) return false;
+  if (expiryPassed(obj['verified_expires_at'])) return false;
   return hashMatches(vsalt, vhash, plaintext);
 }
 
@@ -141,7 +194,18 @@ export class Value {
     readonly value: unknown,
     readonly live: boolean,
     readonly updatedAt: Date | null,
+    /** True iff the hash recomputes over the plaintext AND the verification has not lapsed. */
     readonly verified: boolean,
+    /**
+     * When the person's answering field was verified; null when the value carries no verification.
+     * It is a stamp, not a promise about today — read it with {@link verified}.
+     */
+    readonly verifiedAt: Date | null,
+    /**
+     * When that verification lapses (a document-backed verification dies with the document);
+     * null = it does not lapse. Past → {@link verified} reads false.
+     */
+    readonly verifiedExpiresAt: Date | null,
     readonly raw: Json,
   ) {}
 
@@ -153,7 +217,15 @@ export class Value {
     const live = Boolean(coerceBool(obj['live']));
     const updatedAt = parseIsoDate(obj['updatedAt'] ?? obj['updated_at']);
     const typed = typedValue(obj, opts);
-    return new Value(typed, live, updatedAt, verifiedFrom(obj, typed), obj);
+    return new Value(
+      typed,
+      live,
+      updatedAt,
+      verifiedFrom(obj, typed),
+      parseIsoDate(obj['verified_at']),
+      parseIsoDate(obj['verified_expires_at']),
+      obj,
+    );
   }
 }
 
@@ -327,8 +399,12 @@ export class Change {
     readonly personPublicKey: string | null,
     /** Set on `message_received` — the DECRYPTED message text (else null). */
     readonly messageBody: string | null,
-    /** True iff a field_updated value is verified (hash matches the decrypted plaintext). */
+    /** True iff a field_updated value's hash matches AND the verification has not lapsed. */
     readonly verified: boolean,
+    /** When the answering field was verified; null when the value carries no verification. */
+    readonly verifiedAt: Date | null,
+    /** When that verification lapses; null = it does not. Past → {@link verified} reads false. */
+    readonly verifiedExpiresAt: Date | null,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -410,6 +486,8 @@ export class Change {
       isMessage && obj['person_public_key'] != null ? String(obj['person_public_key']) : null,
       messageBody,
       verifiedFrom(obj, value),
+      parseIsoDate(obj['verified_at']),
+      parseIsoDate(obj['verified_expires_at']),
       parseIsoDate(obj['at']),
       obj,
     );

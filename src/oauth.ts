@@ -13,13 +13,23 @@ import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
 import { decrypt as cryptoDecrypt, hashMatches, loadPrivateKey, type EncWrapper } from './crypto.js';
+import { expiryPassed } from './models.js';
 import { ApiError, AuthError, ConfigError } from './errors.js';
 import { FetchTransport, type HttpTransport, type Sleep } from './http.js';
 
 /** The hosted consent surface. Native apps claim this https link; web is the fallback. */
 export const DEFAULT_AUTHORIZE_URL = 'https://web.allme.fyi/auth';
 
-const NON_CLAIMABLE = new Set(['photo', 'document', 'legal_document']);
+// Binary field types can't be requested as claims — the ID-document subtypes are binary too,
+// so no ID document ever reaches this surface.
+const NON_CLAIMABLE = new Set([
+  'photo',
+  'document',
+  'legal_document',
+  'passport',
+  'photo_id',
+  'drivers_license',
+]);
 const MAX_CLAIMS = 15;
 const MODES = new Set(['signin', 'one_time', 'connect', '2fa_enroll']);
 const RESPONSE_MODES = new Set(['redirect', 'detached']);
@@ -39,6 +49,11 @@ const RESPONSE_MODES = new Set(['redirect', 'detached']);
  * type that can be attested (v1: `email`). Sending it on a `one_time` request is refused with
  * `invalid_request` — that leg carries no source row id, so the server could neither enforce the
  * requirement nor attest it, and an unhonourable requirement is refused rather than quietly dropped.
+ *
+ * `verifiedMaxAgeDays` narrows that demand to a RECENT verification. The app's registered
+ * configuration is a FLOOR and a request may only TIGHTEN it: the effective limit is the minimum of
+ * the two stated ages, and an omitted age tightens nothing — which is why omitting it sends nothing
+ * at all rather than an explicit null. Below 1 is refused at the call.
  */
 export interface Claim {
   /** REQUIRED — the claim's identity on the wire; `values`/`attestations` are keyed by it. */
@@ -49,6 +64,8 @@ export interface Claim {
   /** Only a verified answer satisfies this claim. OIDC flow + verifiable types only. */
   verified?: boolean;
   label?: string;
+  /** Narrows `verified` to a verification no older than this many days; omit for no age limit. */
+  verifiedMaxAgeDays?: number;
 }
 
 /**
@@ -65,15 +82,23 @@ export interface Claim {
  *
  * `verifiedAt` carries the snapshot caveat: it attests the value as verified AT THAT MOMENT, not
  * verified today. A field loses its verification whenever the person re-saves it.
+ * `verifiedExpiresAt` is when that verification lapses on its own (a document-backed verification
+ * dies with the document); an EXPIRED attestation is unverified, so `verified` already reads false
+ * once it has passed.
  */
 export interface Attestation {
-  /** Recomputed here: sha256(salt ‖ plaintext) === hash, constant-time. false = MISMATCH → reject. */
+  /**
+   * Recomputed here: sha256(salt ‖ plaintext) === hash, constant-time, AND not expired.
+   * false = MISMATCH or lapsed → reject.
+   */
   verified: boolean;
   /** Lowercase hex. */
   hash: string;
   /** Lowercase hex. */
   salt: string;
   verifiedAt: string;
+  /** When the verification lapses; null when it does not. */
+  verifiedExpiresAt: string | null;
 }
 
 export type SignInMode = 'signin' | 'one_time' | 'connect' | '2fa_enroll';
@@ -190,6 +215,14 @@ export class OAuthClient {
       if (c.suggest) entry.suggest = c.suggest;
       if (c.required) entry.required = true;
       if (c.verified) entry.verified = true;
+      if (c.verifiedMaxAgeDays !== undefined && c.verifiedMaxAgeDays !== null) {
+        // Refused HERE for the same reason a nameless claim is: the API rejects the whole request
+        // over it, and the integration error belongs at the call that made it.
+        if (!Number.isInteger(c.verifiedMaxAgeDays) || c.verifiedMaxAgeDays < 1) {
+          throw new ConfigError(`claim '${name}': verifiedMaxAgeDays must be a whole number of days, at least 1`);
+        }
+        entry.verified_max_age_days = c.verifiedMaxAgeDays;
+      }
       if (c.label) entry.label = c.label;
       out.push(entry);
       if (out.length >= MAX_CLAIMS) break;
@@ -286,7 +319,7 @@ export class OAuthClient {
     for (const [slug, wrapper] of Object.entries(raw)) {
       const plaintext = values[slug];
       if (plaintext === undefined) continue;
-      let parsed: { hash?: string; salt?: string; verified_at?: string };
+      let parsed: { hash?: string; salt?: string; verified_at?: string; verified_expires_at?: string | null };
       try {
         parsed = JSON.parse(cryptoDecrypt(wrapper, key));
       } catch {
@@ -295,13 +328,17 @@ export class OAuthClient {
       const hash = parsed.hash ?? '';
       const salt = parsed.salt ?? '';
       if (!hash || !salt) continue;
+      const expiresAt = parsed.verified_expires_at ?? null;
       out[slug] = {
         // Recomputed here, constant-time, over the plaintext we just decrypted — never trusted from
-        // the server. false = the delivered value is NOT the verified one; reject it.
-        verified: hashMatches(salt, hash, plaintext),
+        // the server. false = the delivered value is NOT the verified one; reject it. An attestation
+        // whose expiry has passed attests nothing today, so it reads false as well: an expired
+        // attestation is unverified, not "not attested".
+        verified: hashMatches(salt, hash, plaintext) && !expiryPassed(expiresAt),
         hash,
         salt,
         verifiedAt: parsed.verified_at ?? '',
+        verifiedExpiresAt: expiresAt,
       };
     }
     return out;
