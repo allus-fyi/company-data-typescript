@@ -281,7 +281,7 @@ export class HttpClient {
    * Resolves `true` only when the base actually MOVED. A candidate that is absent, not a
    * string, empty, or equal to the current base is not stored and yields `false`. Nothing
    * here validates the candidate against a fetched region list: the SDK stores the base the
-   * server names and uses it, exactly as every first-party client does.
+   * server names and uses it.
    */
   private async rebaseTo(candidate: unknown): Promise<boolean> {
     if (typeof candidate !== 'string') return false;
@@ -391,9 +391,11 @@ export class HttpClient {
     let rebased421 = false;
 
     for (;;) {
-      // Resolved per attempt: a 421 rebase moves the base under the next one.
-      const url = this.url(path);
+      // Resolved per attempt, AFTER the bearer call: the first bearer() of a process mints
+      // the token and rebases from its response, so the base a fresh token was just fetched
+      // under is the base this request must go to as well.
       const token = await this.bearer(false);
+      const url = this.url(path);
       const headers = { Authorization: `Bearer ${token}`, Accept: accept };
       let resp: HttpResponse;
       try {
@@ -466,11 +468,23 @@ export class HttpClient {
     }
   }
 
+  /**
+   * Resolve `path` against the CURRENT base. An already-absolute `path` (the lazy binary
+   * handle's server-supplied `value_url`) is reduced to its path+query and rebuilt against
+   * the current base too — so a value_url minted before a rebase, or replayed on a 421 retry
+   * after one, still lands at the base every other request now uses.
+   */
   private url(path: string): string {
     if (path.startsWith('http://') || path.startsWith('https://')) {
-      return path;
+      path = HttpClient.pathAndQuery(path);
     }
     return this.apiUrl + (path.startsWith('/') ? '' : '/') + path;
+  }
+
+  /** The path + query + hash portion of an absolute URL, dropping its scheme and host. */
+  private static pathAndQuery(absoluteUrl: string): string {
+    const u = new URL(absoluteUrl);
+    return u.pathname + u.search + u.hash;
   }
 
   /** Read the body once and pair it with the headers → a {@link RawResponse} (see {@link getResponse}). */
