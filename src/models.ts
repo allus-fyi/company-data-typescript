@@ -7,7 +7,8 @@
  *
  *     RequestField { slug, label, type, oneTime, mandatory, verified, verifiedMaxAgeDays }
  *     Connection   { id, personId, displayName, connectedAt, values: {<slug>: Value} }
- *     Value        { value, live, updatedAt, verified, verifiedAt, verifiedExpiresAt }
+ *     Value        { value, live, updatedAt, verified, verifiedAt, verifiedExpiresAt,
+ *                    verifiedMethod, verifiedProvider, verificationId }
  *     Change       { id, event, personId, shareCode?, slug?, value?, live?, at }   // id = stable dedup key
  *     LogEntry     { type, message, metadata, at }
  *
@@ -206,6 +207,17 @@ export class Value {
      * null = it does not lapse. Past → {@link verified} reads false.
      */
     readonly verifiedExpiresAt: Date | null,
+    /**
+     * HOW allme bound this value: `email_code` | `sms_code` | `sumsub_id` | `sumsub_address`.
+     * Null when the value was bound before the proof log existed — the three proof fields
+     * arrive together or not at all. Readable whatever {@link verified} says; that boolean
+     * stays the only trust decision.
+     */
+    readonly verifiedMethod: string | null,
+    /** WHO established the proof: `allme` | `sumsub`. Same all-or-none set. */
+    readonly verifiedProvider: string | null,
+    /** The id to quote back to allme in a dispute. Same all-or-none set. */
+    readonly verificationId: string | null,
     readonly raw: Json,
   ) {}
 
@@ -224,6 +236,9 @@ export class Value {
       verifiedFrom(obj, typed),
       parseIsoDate(obj['verified_at']),
       parseIsoDate(obj['verified_expires_at']),
+      obj['verified_method'] != null ? String(obj['verified_method']) : null,
+      obj['verified_provider'] != null ? String(obj['verified_provider']) : null,
+      obj['verification_id'] != null ? String(obj['verification_id']) : null,
       obj,
     );
   }
@@ -405,6 +420,17 @@ export class Change {
     readonly verifiedAt: Date | null,
     /** When that verification lapses; null = it does not. Past → {@link verified} reads false. */
     readonly verifiedExpiresAt: Date | null,
+    /**
+     * HOW allme bound this value: `email_code` | `sms_code` | `sumsub_id` | `sumsub_address`.
+     * Null when the value was bound before the proof log existed — the three proof fields
+     * arrive together or not at all. Readable whatever {@link verified} says; that boolean
+     * stays the only trust decision.
+     */
+    readonly verifiedMethod: string | null,
+    /** WHO established the proof: `allme` | `sumsub`. Same all-or-none set. */
+    readonly verifiedProvider: string | null,
+    /** The id to quote back to allme in a dispute. Same all-or-none set. */
+    readonly verificationId: string | null,
     readonly at: Date | null,
     readonly raw: Json,
   ) {}
@@ -488,6 +514,9 @@ export class Change {
       verifiedFrom(obj, value),
       parseIsoDate(obj['verified_at']),
       parseIsoDate(obj['verified_expires_at']),
+      obj['verified_method'] != null ? String(obj['verified_method']) : null,
+      obj['verified_provider'] != null ? String(obj['verified_provider']) : null,
+      obj['verification_id'] != null ? String(obj['verification_id']) : null,
       parseIsoDate(obj['at']),
       obj,
     );

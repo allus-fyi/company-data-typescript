@@ -99,6 +99,16 @@ export interface Attestation {
   verifiedAt: string;
   /** When the verification lapses; null when it does not. */
   verifiedExpiresAt: string | null;
+  /**
+   * HOW allme bound the value: `email_code` | `sms_code` | `sumsub_id` | `sumsub_address`.
+   * Read from the OPENED seal. Null when the value was bound before the proof log existed —
+   * the three proof members arrive together or not at all.
+   */
+  verifiedMethod: string | null;
+  /** WHO established the proof: `allme` | `sumsub`. Same all-or-none set. */
+  verifiedProvider: string | null;
+  /** The id to quote back to allme in a dispute. Same all-or-none set. */
+  verificationId: string | null;
 }
 
 export type SignInMode = 'signin' | 'one_time' | 'connect' | '2fa_enroll';
@@ -319,7 +329,15 @@ export class OAuthClient {
     for (const [slug, wrapper] of Object.entries(raw)) {
       const plaintext = values[slug];
       if (plaintext === undefined) continue;
-      let parsed: { hash?: string; salt?: string; verified_at?: string; verified_expires_at?: string | null };
+      let parsed: {
+        hash?: string;
+        salt?: string;
+        verified_at?: string;
+        verified_expires_at?: string | null;
+        verified_method?: string | null;
+        verified_provider?: string | null;
+        verification_id?: string | null;
+      };
       try {
         parsed = JSON.parse(cryptoDecrypt(wrapper, key));
       } catch {
@@ -339,6 +357,11 @@ export class OAuthClient {
         salt,
         verifiedAt: parsed.verified_at ?? '',
         verifiedExpiresAt: expiresAt,
+        // Additive INSIDE the seal, and parse-permissive: a seal built before the proof log
+        // existed carries none of the three and every one reads null.
+        verifiedMethod: parsed.verified_method ?? null,
+        verifiedProvider: parsed.verified_provider ?? null,
+        verificationId: parsed.verification_id ?? null,
       };
     }
     return out;

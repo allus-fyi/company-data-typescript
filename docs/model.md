@@ -55,6 +55,9 @@ class Value {
   verified: boolean;         // the hash recomputes over the plaintext AND the verification has not lapsed
   verifiedAt: Date | null;        // when the answering field was verified
   verifiedExpiresAt: Date | null; // when that verification lapses; null = it does not
+  verifiedMethod: string | null;  // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+  verifiedProvider: string | null; // WHO established the proof: allme|sumsub
+  verificationId: string | null;  // the proof id to quote back to allme in a dispute
   raw: Record<string, unknown>;
 }
 ```
@@ -133,6 +136,9 @@ class Change {
   verified: boolean;          // field_updated only; hash recomputes AND the verification has not lapsed
   verifiedAt: Date | null;        // when the answering field was verified
   verifiedExpiresAt: Date | null; // when that verification lapses; null = it does not
+  verifiedMethod: string | null;  // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+  verifiedProvider: string | null; // WHO established the proof: allme|sumsub
+  verificationId: string | null;  // the proof id to quote back to allme in a dispute
   at: Date | null;            // the change time (no separate updatedAt on a change)
   raw: Record<string, unknown>;
 }
