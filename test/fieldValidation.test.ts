@@ -29,8 +29,8 @@ for (const c of cases) {
   });
 }
 
-test('field validation vector has all 115 cases', () => {
-  assert.equal(cases.length, 115);
+test('field validation vector has all 148 cases', () => {
+  assert.equal(cases.length, 148);
 });
 
 test('fieldValueError returns the type tag on failure', () => {

@@ -26,6 +26,13 @@ const URL_RE = /^https?:\/\/[^\s/$.?#][^\s]*\.[^\s]{2,}$/i;
 const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/;
 const PHONE_RE = /^\+?\d{4,15}$/;
 const CARD_RE = /^\d{12,19}$/;
+// Numeric grammars accept ASCII digits only.
+const INTEGER_RE = /^-?[0-9]+$/;
+// decimal(10,2) is a FIXED shape: up to 8 integer digits + up to 2 decimal digits (10
+// significant digits total), never a per-field configurable precision.
+const DECIMAL_RE = /^-?[0-9]{1,8}(\.[0-9]{1,2})?$/;
+// Float accepts decimal or scientific notation.
+const FLOAT_RE = /^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$/;
 const GENDER = ['Male', 'Female', 'Non-binary', 'Prefer not to say'];
 
 type SubRule = { re?: RegExp; int?: boolean; kind?: string };
@@ -63,7 +70,7 @@ type Rule =
   | { kind: 'regex'; re: RegExp }
   | { kind: 'enum'; values: string[] }
   | { kind: 'object' }
-  | { kind: 'phone' | 'url' | 'date' | 'number' | 'boolean' | 'countryCode' };
+  | { kind: 'phone' | 'url' | 'date' | 'number' | 'integer' | 'decimal' | 'float' | 'boolean' | 'countryCode' };
 
 const RULES: Record<string, Rule> = {
   email: { kind: 'regex', re: EMAIL_RE },
@@ -74,6 +81,7 @@ const RULES: Record<string, Rule> = {
   address: { kind: 'object' }, creditcard: { kind: 'object' }, bank: { kind: 'object' },
   document: { kind: 'object' }, legal_document: { kind: 'object' },
   number: { kind: 'number' }, boolean: { kind: 'boolean' },
+  integer: { kind: 'integer' }, decimal: { kind: 'decimal' }, float: { kind: 'float' },
   country: { kind: 'countryCode' }, nationality: { kind: 'countryCode' },
   // text + unknown => no rule => accept anything
 };
@@ -126,6 +134,12 @@ function applyKind(kind: string, value: string): boolean {
     }
     case 'number':
       return value.trim() !== '' && Number.isFinite(Number(value));
+    case 'integer':
+      return INTEGER_RE.test(value.trim());
+    case 'decimal':
+      return DECIMAL_RE.test(value.trim());
+    case 'float':
+      return FLOAT_RE.test(value.trim());
     case 'boolean':
       return value === 'true' || value === 'false';
     case 'countryCode':
