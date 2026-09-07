@@ -804,6 +804,7 @@ value, metadata, createdAt, updatedAt, raw }` with a `.json()` helper for json d
 
 * `listDocuments(opts)` filters optionally by `personUserId` and/or `status` and pages with `limit`/`offset`.
 * `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).
+* A contract-flow-generated document can also read `waiting` — a run-participant copy whose signer has not been reached yet in the run's ordered signing plan. It is read-only: `updateDocumentStatus` throws (`error_key: 'documents.run_managed'`, 409) if you try to write `status` on a run-participant document while it is `waiting`, `ready_to_sign` or `offering` — that status moves only through flow generation, the run's own advance, sign/accept, or a run cancel/decline. Such a document's `runSignatures` carries the run's ordered signature summary.
 * `documentFile(id)` (#491) downloads a `'file'` document's BYTES — the metadata methods don't include them. A **broadcast** (plaintext) document's bytes are returned as-is; a **per-person / private** document is encrypted to the *recipient's* key (not your service key), so `documentFile` fails clearly with `documents.recipient_encrypted` (`ApiError`) rather than a doomed decrypt. For a generated flow contract's own copy use `flowRunDocument(runId)` below (that copy IS service-key-encrypted).
 
 ### Contract flows & identity (#491)

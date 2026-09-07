@@ -566,6 +566,12 @@ export class Document {
     readonly requiresAcceptance: boolean,
     /** Contract sign/accept audit trail (company-side reads only). */
     readonly signatures: Json[],
+    /**
+     * Present only on a contract-flow run-participant document: the run's ordered signature
+     * summary, one entry per participant owing an act — each
+     * `{party_key, document_id, position, status, action, acted_at}`. Null on any other document.
+     */
+    readonly runSignatures: Json[] | null,
     private readonly decryptValue: DecryptWrapper | null,
     readonly raw: Json,
   ) {}
@@ -613,6 +619,7 @@ export class Document {
       Boolean(coerceBool(obj['requires_signature'])),
       Boolean(coerceBool(obj['requires_acceptance'])),
       Array.isArray(obj['signatures']) ? (obj['signatures'] as Json[]) : [],
+      Array.isArray(obj['run_signatures']) ? (obj['run_signatures'] as Json[]) : null,
       opts.decryptValue ?? null,
       obj,
     );
@@ -666,6 +673,45 @@ export class LogEntry {
  * `definition` is the pinned flow-version graph (`nodes`, `edges`, `parties`,
  * `output_mode`).
  */
+
+/**
+ * One participant's row on a run's `participants[]` (flows.html §5a/§9 item 12) — the durable
+ * participant set, additively carrying its place in the leaf PDF rule's ordered signing plan.
+ * One account may hold TWO of these (two owner parties, or one customer bound to two party
+ * keys) — never collapse this to a single row by user id.
+ */
+export class FlowRunParticipant {
+  constructor(
+    readonly partyKey: string | null,
+    readonly personUserId: string | null,
+    readonly connectionId: string | null,
+    readonly documentId: string | null,
+    readonly documentStatus: string | null,
+    readonly requiresSignature: boolean,
+    readonly requiresAcceptance: boolean,
+    /** 1-based place in the signing plan; null for a party the plan does not name. */
+    readonly position: number | null,
+    /** 'signed' | 'accepted' | null — null until this participant's document has acted. */
+    readonly action: string | null,
+    readonly actedAt: string | null,
+  ) {}
+
+  static fromApi(o: Json): FlowRunParticipant {
+    return new FlowRunParticipant(
+      o['party_key'] != null ? String(o['party_key']) : null,
+      o['person_user_id'] != null ? String(o['person_user_id']) : null,
+      o['connection_id'] != null ? String(o['connection_id']) : null,
+      o['document_id'] != null ? String(o['document_id']) : null,
+      o['document_status'] != null ? String(o['document_status']) : null,
+      Boolean(coerceBool(o['requires_signature'])),
+      Boolean(coerceBool(o['requires_acceptance'])),
+      o['position'] != null ? Number(o['position']) : null,
+      o['action'] != null ? String(o['action']) : null,
+      o['acted_at'] != null ? String(o['acted_at']) : null,
+    );
+  }
+}
+
 export class FlowRun {
   constructor(
     readonly id: string,
@@ -685,6 +731,12 @@ export class FlowRun {
     readonly referenceDate: string | null,
     readonly createdAt: Date | null,
     readonly updatedAt: Date | null,
+    /**
+     * Every party the run binds, the owning company included (flows.html §5a/§9 item 12).
+     * `connectionId` above names only the PRIMARY counterparty, so a multi-actor run's other
+     * counterparties are reachable only here.
+     */
+    readonly participants: FlowRunParticipant[],
     readonly raw: Json,
   ) {}
 
@@ -732,6 +784,12 @@ export class FlowRun {
         : definition['output_mode'] != null
           ? String(definition['output_mode'])
           : null;
+    const participantsRaw = o['participants'];
+    const participants = Array.isArray(participantsRaw)
+      ? participantsRaw
+          .filter((p): p is Json => p !== null && typeof p === 'object' && !Array.isArray(p))
+          .map((p) => FlowRunParticipant.fromApi(p))
+      : [];
     return new FlowRun(
       o['id'] != null ? String(o['id']) : '',
       o['flow_id'] != null ? String(o['flow_id']) : null,
@@ -749,6 +807,7 @@ export class FlowRun {
       o['reference_date'] != null ? String(o['reference_date']) : null,
       parseIsoDate(o['created_at']),
       parseIsoDate(o['updated_at']),
+      participants,
       o,
     );
   }

@@ -82,6 +82,7 @@ export {
   Change,
   Document,
   FlowRun,
+  FlowRunParticipant,
   LogEntry,
   STRUCTURED_TYPES,
   BINARY_TYPES,
