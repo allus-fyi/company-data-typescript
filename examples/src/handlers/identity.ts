@@ -145,7 +145,13 @@ export class IdentityHandler {
 
   // ── POST /api/scenarios/{id}/config ─────────────────────────────────────
 
-  async config(idStr: string, host: string, in_: Record<string, unknown>, res: ServerResponse): Promise<void> {
+  async config(
+    idStr: string,
+    host: string,
+    proto: 'http' | 'https',
+    in_: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> {
     const id = Number(idStr);
     if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
     // The redirect URI is derived from THIS request's origin and from nothing else. Refuse rather
@@ -156,7 +162,7 @@ export class IdentityHandler {
     const cfg: Record<string, unknown> = {
       api_url: (str(in_.apiUrl) || DEFAULT_API_URL).replace(/\/+$/, ''),
       oauth_client_id: str(in_.oauthClientId),
-      oauth_redirect_uri: this.redirectUri(host),
+      oauth_redirect_uri: this.redirectUri(host, proto),
     };
     const secret = str(in_.oauthClientSecret);
     if (secret !== '') cfg.oauth_client_secret = secret;
@@ -199,7 +205,7 @@ export class IdentityHandler {
 
   // ── POST /api/scenarios/{id}/start ──────────────────────────────────────
 
-  async start(idStr: string, host: string, res: ServerResponse): Promise<void> {
+  async start(idStr: string, host: string, proto: 'http' | 'https', res: ServerResponse): Promise<void> {
     const id = Number(idStr);
     if (SCENARIOS[id] !== 'runnable') return sendJson(res, { error: 'not_found' }, 404);
     if (!this.rt.hasConfig(idStr)) return sendJson(res, { error: 'not_configured' }, 409); // built from the file
@@ -241,14 +247,14 @@ export class IdentityHandler {
 
       case 5: {
         // OIDC login
-        const config = await this.oidcConfigFor(idStr, host);
+        const config = await this.oidcConfigFor(idStr, host, proto);
         const verifier = oidc.randomPKCECodeVerifier();
         const challenge = await oidc.calculatePKCECodeChallenge(verifier);
         const nonce = oidc.randomNonce();
         run.verifier = verifier;
         run.nonce = nonce;
         const url = oidc.buildAuthorizationUrl(config, {
-          redirect_uri: this.configRedirectUri(idStr, host),
+          redirect_uri: this.configRedirectUri(idStr, host, proto),
           scope: 'openid profile email',
           state: runId,
           nonce,
@@ -306,7 +312,7 @@ export class IdentityHandler {
 
   // ── GET /callback ───────────────────────────────────────────────────────
 
-  async callback(url: URL, host: string, res: ServerResponse): Promise<void> {
+  async callback(url: URL, host: string, proto: 'http' | 'https', res: ServerResponse): Promise<void> {
     const state = url.searchParams.get('state') ?? '';
     const run = this.rt.readRun(state);
     if (run === null) {
@@ -325,7 +331,7 @@ export class IdentityHandler {
       } else if (url.searchParams.get('code')) {
         const code = url.searchParams.get('code')!;
         if (id === 5) {
-          await this.completeOidc(run, url, host);
+          await this.completeOidc(run, url, host, proto);
         } else {
           await this.completeSignin(run, code, id);
         }
@@ -459,12 +465,19 @@ export class IdentityHandler {
    * Additionally resolves userinfo through `OAuthClient.resolveUserinfo` with the access token
    * openid-client already obtained.
    */
-  private async completeOidc(run: RunRecord, currentUrl: URL, host: string): Promise<void> {
+  private async completeOidc(run: RunRecord, currentUrl: URL, host: string, proto: 'http' | 'https'): Promise<void> {
     const idStr = String(Number(run.scenario ?? 0));
-    const config = await this.oidcConfigFor(idStr, host);
+    const config = await this.oidcConfigFor(idStr, host, proto);
     run.calls = addCall(run.calls, CALL_OIDC_DISCOVERY);
     run.calls = addCall(run.calls, CALL_OIDC_COMPLETE);
-    const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
+    // openid-client derives the token-exchange redirect_uri from THIS url's own origin (host +
+    // scheme, params stripped) — never from the `redirect_uris` metadata above. `currentUrl` was
+    // built by the router with a fixed http: scheme (only ever used there to make the request path
+    // parseable), so the scheme this request actually arrived on has to be restored here or the
+    // exchange sends a redirect_uri that disagrees with the one the authorize step registered.
+    const exchangeUrl = new URL(currentUrl.toString());
+    exchangeUrl.protocol = `${proto}:`;
+    const tokens = await oidc.authorizationCodeGrant(config, exchangeUrl, {
       pkceCodeVerifier: String(run.verifier ?? ''),
       expectedNonce: String(run.nonce ?? ''),
       expectedState: String(run.state ?? ''),
@@ -554,7 +567,7 @@ export class IdentityHandler {
    * Discovery is driven off the configured api base (issuer override); http bases enable insecure requests
    * for the local stack. Auth uses client_secret_post — the token endpoint's method.
    */
-  private async oidcConfigFor(idStr: string, host: string): Promise<oidc.Configuration> {
+  private async oidcConfigFor(idStr: string, host: string, proto: 'http' | 'https'): Promise<oidc.Configuration> {
     const cfg = this.rt.readConfig(idStr);
     const server = new URL(str(cfg.api_url) || DEFAULT_API_URL);
     const options: oidc.DiscoveryRequestOptions = {};
@@ -562,7 +575,7 @@ export class IdentityHandler {
     return oidc.discovery(
       server,
       str(cfg.oauth_client_id),
-      { redirect_uris: [this.configRedirectUri(idStr, host)], response_types: ['code'] },
+      { redirect_uris: [this.configRedirectUri(idStr, host, proto)], response_types: ['code'] },
       oidc.ClientSecretPost(str(cfg.oauth_client_secret)),
       options,
     );
@@ -573,21 +586,22 @@ export class IdentityHandler {
    * the authorize URL carried, so the two legs of the exchange cannot diverge. An absent/empty record
    * re-derives from THIS request's origin; it never substitutes a host.
    */
-  private configRedirectUri(idStr: string, host: string): string {
-    return str(this.rt.readConfig(idStr).oauth_redirect_uri) || this.redirectUri(host);
+  private configRedirectUri(idStr: string, host: string, proto: 'http' | 'https'): string {
+    return str(this.rt.readConfig(idStr).oauth_redirect_uri) || this.redirectUri(host, proto);
   }
 
   // ── input / config plumbing ──────────────────────────────────────────────
 
   /**
-   * The registered redirect URI: http://{host}/callback, host = the origin the browser actually used.
-   * Never falls back to a hardcoded host — `127.0.0.1` and `localhost` are DIFFERENT origins for
-   * redirect matching and for browser storage alike, so a substituted default drops the developer on an
-   * origin whose localStorage never held the setup and whose URI the OAuth app never registered.
+   * The registered redirect URI: {scheme}://{host}/callback, host = the origin the browser actually
+   * used and scheme = what it reached us on. Never falls back to a hardcoded host — `127.0.0.1` and
+   * `localhost` are DIFFERENT origins for redirect matching and for browser storage alike, so a
+   * substituted default drops the developer on an origin whose localStorage never held the setup and
+   * whose URI the OAuth app never registered.
    */
-  private redirectUri(host: string): string {
+  private redirectUri(host: string, proto: 'http' | 'https'): string {
     if (host === '') throw new Error(NO_ORIGIN);
-    return `http://${host}/callback`;
+    return `${proto}://${host}/callback`;
   }
 
   private claims(in_: Record<string, unknown>): string[] {

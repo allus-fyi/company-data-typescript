@@ -5,6 +5,7 @@ import {
   guardResponseSocket,
   readJsonBody,
   readRawBody,
+  requestScheme,
   sendFailure,
   sendJson,
   sendRawJson,
@@ -69,6 +70,10 @@ export class Server {
       // below only has to make req.url's path and query readable, so it uses a host that cannot resolve
       // rather than a plausible-looking one.
       const host = String(req.headers.host ?? '').trim();
+      // The scheme THIS request reached us on — a TLS proxy in front of the example is the only
+      // source (there is no in-process TLS termination). Feeds only the identity redirect-URI
+      // derivation; every other handler is scheme-agnostic.
+      const proto = requestScheme(req.headers['x-forwarded-proto']);
       const url = new URL(req.url ?? '/', `http://${host || 'no-host.invalid'}`);
       const path = decodeURIComponent(url.pathname);
 
@@ -76,7 +81,7 @@ export class Server {
       if (path === '/api/meta' && method === 'GET') {
         this.meta(res);
       } else if (path === '/callback' && method === 'GET') {
-        await this.identity.callback(url, host, res); // identity OAuth/OIDC redirect leg
+        await this.identity.callback(url, host, proto, res); // identity OAuth/OIDC redirect leg
       } else if (path === '/webhook' && method === 'POST') {
         await this.companyData.webhook(req, res); // PUBLIC company-data inbound delivery (not under /api/)
       } else if (path === '/api/clear' && method === 'POST') {
@@ -92,9 +97,9 @@ export class Server {
         if (blob === null) sendJson(res, { error: 'not_found' }, 404);
         else sendRawJson(res, blob);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/config$/)) && method === 'POST') {
-        await this.dispatchConfig(m[1], host, req, res);
+        await this.dispatchConfig(m[1], host, proto, req, res);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/start$/)) && method === 'POST') {
-        await this.dispatchStart(m[1], host, res);
+        await this.dispatchStart(m[1], host, proto, res);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/enroll$/)) && method === 'POST') {
         await this.dispatchEnroll(m[1], req, res);
       } else if ((m = path.match(/^\/api\/scenarios\/([\w:.-]+)\/cleanup$/)) && method === 'POST') {
@@ -129,16 +134,22 @@ export class Server {
 
   // ── dispatch ─────────────────────────────────────────────────────────────
 
-  private async dispatchConfig(id: string, host: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async dispatchConfig(
+    id: string,
+    host: string,
+    proto: 'http' | 'https',
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const in_ = await readJsonBody(req);
-    if (this.identity.owns(id)) return this.identity.config(id, host, in_, res);
+    if (this.identity.owns(id)) return this.identity.config(id, host, proto, in_, res);
     if (this.flow.owns(id)) return this.flow.config(id, host, in_, res);
     if (this.companyData.owns(id)) return this.companyData.config(id, host, in_, res);
     sendJson(res, { error: 'not_found' }, 404);
   }
 
-  private async dispatchStart(id: string, host: string, res: ServerResponse): Promise<void> {
-    if (this.identity.owns(id)) return this.identity.start(id, host, res);
+  private async dispatchStart(id: string, host: string, proto: 'http' | 'https', res: ServerResponse): Promise<void> {
+    if (this.identity.owns(id)) return this.identity.start(id, host, proto, res);
     if (this.flow.owns(id)) return this.flow.start(id, host, res);
     if (this.companyData.owns(id)) return this.companyData.start(id, host, res);
     sendJson(res, { error: 'not_found' }, 404);

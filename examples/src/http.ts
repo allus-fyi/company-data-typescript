@@ -148,6 +148,16 @@ export function headerValue(v: string | string[] | undefined): string | null {
   return Array.isArray(v) ? (v[0] ?? null) : v;
 }
 
+/**
+ * The scheme THIS request reached us on. There is no TLS termination in-process, so a TLS proxy in
+ * front of the example is the only source: the first comma-separated value of `X-Forwarded-Proto`,
+ * lowercased. Anything but `https` there — including an absent header — means `http`.
+ */
+export function requestScheme(v: string | string[] | undefined): 'http' | 'https' {
+  const first = (headerValue(v) ?? '').split(',')[0].trim().toLowerCase();
+  return first === 'https' ? 'https' : 'http';
+}
+
 /** Coerce any config/body value to a string (missing → ''). */
 export function str(v: unknown): string {
   return v === undefined || v === null ? '' : String(v);
