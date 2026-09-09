@@ -112,14 +112,14 @@ test('authorizeUrl pkce + detached', () => {
   assert.equal(q.get('code_challenge_method'), 'S256');
 });
 
-test('authorizeUrl claim validation drops binary/empty', () => {
+test('authorizeUrl claim validation', () => {
   const c = new OAuthClient(idwCfg());
   // Every claim carries a mandatory `name` — the identity everything downstream is keyed by.
+  // The TYPE is passed through as written: which types are claimable is registry data the server
+  // owns, and a type it does not accept comes back as invalid_request.
   const claims: Claim[] = [
     { name: 'email', type: 'email', suggest: 'email_personal' },
-    { name: 'avatar', type: 'photo' },
     { name: 'phone', type: 'phone', required: true },
-    { name: 'nothing', type: '' },
   ];
   const { q } = parseUrl(c.authorizeUrl('one_time', { claims }));
   const parsed = JSON.parse(q.get('claims')!);

@@ -20,16 +20,6 @@ import { FetchTransport, type HttpTransport, type Sleep } from './http.js';
 /** The hosted consent surface. Native apps claim this https link; web is the fallback. */
 export const DEFAULT_AUTHORIZE_URL = 'https://web.allme.fyi/auth';
 
-// Binary field types can't be requested as claims — the ID-document subtypes are binary too,
-// so no ID document ever reaches this surface.
-const NON_CLAIMABLE = new Set([
-  'photo',
-  'document',
-  'legal_document',
-  'passport',
-  'photo_id',
-  'drivers_license',
-]);
 const MAX_CLAIMS = 15;
 const MODES = new Set(['signin', 'one_time', 'connect', '2fa_enroll']);
 const RESPONSE_MODES = new Set(['redirect', 'detached']);
@@ -214,14 +204,15 @@ export class OAuthClient {
     const out: Array<Record<string, unknown>> = [];
     const seen = new Set<string>();
     for (const c of claims) {
-      if (!c.type || NON_CLAIMABLE.has(c.type)) continue;
-      // §2: `name` is the claim's identity and it is mandatory. Refused HERE rather than left to
-      // the API, so the integration error surfaces at the call that made it.
+      // `name` is the claim's identity and it is mandatory. Refused HERE rather than left to
+      // the API, so the integration error surfaces at the call that made it. The TYPE is not
+      // filtered: what a claim may be typed as is registry data the server owns, and this client
+      // holds none of it.
       const name = (c.name ?? '').trim();
       if (!name) throw new ConfigError('every claim must carry a `name`');
       if (seen.has(name)) throw new ConfigError(`duplicate claim name '${name}'`);
       seen.add(name);
-      const entry: Record<string, unknown> = { name, type: c.type };
+      const entry: Record<string, unknown> = { name, type: c.type ?? '' };
       if (c.suggest) entry.suggest = c.suggest;
       if (c.required) entry.required = true;
       if (c.verified) entry.verified = true;

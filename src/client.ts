@@ -16,8 +16,8 @@
  * `webhooks` module (all config-driven, no key/secret args):
  *
  *     client.verifyWebhook(rawBody, headers) -> bool
- *     client.parseWebhook(rawBody, headers)  -> Change
- *     client.handleWebhook(rawBody, headers) -> Change
+ *     await client.parseWebhook(rawBody, headers)  -> Change
+ *     await client.handleWebhook(rawBody, headers) -> Change
  *
  * How it is wired (everything else the SDK hides):
  *   - **Auth + transport** — an {@link HttpClient} owns the `client_credentials`
@@ -26,6 +26,11 @@
  *     from the configured encrypted PEM + passphrase into an in-memory key; a
  *     `decryptValue` closure over it is handed to every model factory and the pump
  *     (config-only key handling — the key never appears in a method signature).
+ *   - **Field-type registry** — `fieldTypes()` is fetched beside the catalog and held for the
+ *     life of the client; it is what a type MEANS, so a value's shape follows the type's resolved
+ *     primitive and storage lane (a `composite` parses to an object, a `photo`/`document` lane
+ *     becomes a lazy binary handle) rather than a list of type names. A type the held registry
+ *     does not carry triggers one bounded refetch.
  *   - **Slug catalog** — `requestFields()` is fetched once and cached; its slug→type
  *     map types every value (so `address` parses to an object, `photo` becomes a
  *     lazy binary handle, etc.).
@@ -52,8 +57,8 @@ import {
   type BinaryFetchResult,
   type EncWrapper,
 } from './crypto.js';
-import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError } from './errors.js';
-import { isFieldValueValid } from './fieldValidation.js';
+import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError, WebhookError } from './errors.js';
+import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { evaluateCondition } from './flowCondition.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
@@ -61,13 +66,14 @@ import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from '.
 import { createCipheriv, createPublicKey, randomBytes } from 'node:crypto';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
-import { handleWebhook, loadAccountKey, parseWebhook, verifyWebhook, type Headers } from './webhooks.js';
+import { decodeWebhookPayload, loadAccountKey, verifyWebhook, type Headers } from './webhooks.js';
 
 // Endpoint paths (the API base comes from Config; HttpClient joins them).
 const BASE = '/api/company-data';
 const CONNECTIONS = `${BASE}/connections`;
 const CHANGES = `${BASE}/changes`;
 const REQUEST_FIELDS = `${BASE}/request-fields`;
+const FIELD_TYPES = '/api/contact-field-types';
 const LOGS = `${BASE}/logs`;
 const DOCUMENTS = `${BASE}/documents`;
 const CONNECT_REQUESTS = `${BASE}/connect-requests`;
@@ -114,10 +120,25 @@ export class Client {
   private readonly privateKey: KeyObject;
   private readonly accountKey: KeyObject | null;
 
-  // The slug catalog, fetched once on first requestFields() and cached.
+  // The slug catalog, fetched once on first requestFields() and cached. A slug it does not
+  // carry — a request slot configured after this client started — triggers ONE refetch; a slug a
+  // refetch still does not carry is remembered in `unresolvedSlugs` and never asked for again, so
+  // a slot this deployment does not have cannot turn every later value into a round trip.
   private cachedRequestFields: RequestField[] | null = null;
   private typeBySlug: Map<string, string> = new Map();
   private requestFieldsInFlight: Promise<RequestField[]> | null = null;
+  private readonly unresolvedSlugs = new Set<string>();
+
+  // The field-type registry, fetched beside the catalog and held for the life of the client. A
+  // type it does not carry triggers ONE refetch; a type a refetch still does not resolve is
+  // remembered in `unresolvedTypes` and never asked for again, so a value of a type this
+  // deployment does not have cannot turn every later value into a round trip.
+  private cachedFieldTypes: FieldTypeRegistry | null = null;
+  private fieldTypesInFlight: Promise<FieldTypeRegistry> | null = null;
+  private readonly unresolvedTypes = new Set<string>();
+  // The last registry load's failure, held so a synchronous reader raises it instead of reading
+  // an empty registry. Cleared by the first load that succeeds.
+  private fieldTypesFailure: unknown = null;
 
   private _pump: Pump | null = null;
 
@@ -245,13 +266,7 @@ export class Client {
       return this.cachedRequestFields;
     }
     if (this.requestFieldsInFlight === null) {
-      this.requestFieldsInFlight = (async () => {
-        const body = await this.http.get(REQUEST_FIELDS);
-        const fields = RequestField.listFromApi(body);
-        this.cachedRequestFields = fields;
-        this.typeBySlug = new Map(fields.filter((f) => f.slug).map((f) => [f.slug, f.type]));
-        return fields;
-      })();
+      this.requestFieldsInFlight = this.loadRequestFields();
       try {
         return await this.requestFieldsInFlight;
       } finally {
@@ -259,6 +274,140 @@ export class Client {
       }
     }
     return this.requestFieldsInFlight;
+  }
+
+  /**
+   * One fetch of the catalog, replacing the held one only once it has ARRIVED.
+   *
+   * The catalog is published only once the registry that types it has loaded. Publishing first
+   * would let a registry failure leave a cached catalog behind that no later call retries, and
+   * every value it types would then be read through a registry that knows nothing.
+   */
+  private async loadRequestFields(): Promise<RequestField[]> {
+    const body = await this.http.get(REQUEST_FIELDS);
+    const fields = RequestField.listFromApi(body);
+    const bySlug = new Map(fields.filter((f) => f.slug).map((f) => [f.slug, f.type]));
+    await this.ensureTypesKnown(bySlug.values());
+    this.typeBySlug = bySlug;
+    this.cachedRequestFields = fields;
+    return fields;
+  }
+
+  /**
+   * The field-type registry — what every TYPE in the catalog means.
+   *
+   * Fetched from `GET /api/contact-field-types` beside the request-field catalog and held in
+   * memory for the life of the client. It says which primitive draws a type, which named check
+   * verifies it, which regexes it adds, which sub-fields it carries and on which storage lane its
+   * value lives — so a value's shape and a value's validity both follow the served rows rather
+   * than a list of type names. Concurrent callers share a single in-flight fetch.
+   */
+  async fieldTypes(): Promise<FieldTypeRegistry> {
+    if (this.cachedFieldTypes !== null) return this.cachedFieldTypes;
+    if (this.fieldTypesInFlight === null) {
+      this.fieldTypesInFlight = this.loadFieldTypes();
+      try {
+        const registry = await this.fieldTypesInFlight;
+        this.cachedFieldTypes = registry;
+        return registry;
+      } finally {
+        this.fieldTypesInFlight = null;
+      }
+    }
+    return this.fieldTypesInFlight;
+  }
+
+  /**
+   * One fetch of the registry rows, with no caching of its own.
+   *
+   * A failure is remembered as a failure: it is re-thrown to the caller that asked, and recorded
+   * so a later synchronous reader raises it too rather than reading an empty registry, whose
+   * "accept anything" answer for an unknown type would be indistinguishable from a real one.
+   */
+  private async loadFieldTypes(): Promise<FieldTypeRegistry> {
+    try {
+      // The registry route answers JSON to every caller — it is not one of the company-data
+      // routes that honour the configured `format` — so its body is parsed as JSON whatever
+      // this client speaks elsewhere.
+      const body = this.http.parseBody(await this.http.getResponse(FIELD_TYPES), false);
+      const registry = new FieldTypeRegistry(Array.isArray(body) ? (body as FieldTypeRow[]) : []);
+      this.fieldTypesFailure = null;
+      return registry;
+    } catch (exc) {
+      this.fieldTypesFailure = exc;
+      throw exc;
+    }
+  }
+
+  /**
+   * One bounded refetch when the held registry does not carry a type in use.
+   *
+   * A row added to the registry after this client started is what makes a type unknown here, and
+   * one refetch is what resolves it. A type still absent afterwards is this deployment's answer,
+   * not a stale cache, so it is remembered and never asked for again.
+   *
+   * The refetch replaces the held registry only once it has arrived: a refetch that fails leaves
+   * the rows already loaded standing, so learning about one new type can never cost the client
+   * every type it already knew.
+   */
+  private async ensureTypesKnown(types: Iterable<string>): Promise<void> {
+    let registry = await this.fieldTypes();
+    const missing = [...types].filter(
+      (t) => t && !registry.knows(t) && !this.unresolvedTypes.has(t),
+    );
+    if (missing.length === 0) return;
+    registry = await this.loadFieldTypes();
+    this.cachedFieldTypes = registry;
+    for (const t of missing) if (!registry.knows(t)) this.unresolvedTypes.add(t);
+  }
+
+  /**
+   * The registry the sync model factories read; loaded by `requestFields()` before any typing.
+   *
+   * A load that FAILED raises that failure here rather than answering an empty registry — an
+   * unloaded registry says every type is unknown, and "unknown accepts anything" is a verdict
+   * about the deployment, never a stand-in for a fetch that did not happen. A client that has
+   * never asked for the registry — a receiver calling only the webhook parsers — reads the empty
+   * one, which is the honest answer for a client that fetched nothing.
+   */
+  private loadedFieldTypes(): FieldTypeRegistry {
+    if (this.cachedFieldTypes !== null) return this.cachedFieldTypes;
+    if (this.fieldTypesFailure !== null) throw this.fieldTypesFailure;
+    return new FieldTypeRegistry();
+  }
+
+  /**
+   * What every path that TYPES a payload does first: hold the catalog, and hold a registry that
+   * carries every type the catalog names.
+   *
+   * This is the catalog leg only. The payload leg is {@link ensureSlugsKnown}.
+   */
+  private async prepareTyping(): Promise<void> {
+    await this.requestFields();
+    await this.ensureTypesKnown(this.typeBySlug.values());
+  }
+
+  /**
+   * The payload leg of the heal: ONE bounded catalog refetch for a slug the held catalog does not
+   * carry.
+   *
+   * A request slot configured after this client started is what makes a slug unknown, and no walk
+   * of the held catalog can discover it — the SLUG a value or a change names is the only trigger
+   * there is. One refetch resolves it, together with the type that slot introduced, which the
+   * reload puts through the registry heal. A slug still absent afterwards belongs to no slot this
+   * client can see, so it is remembered and never asked for again.
+   *
+   * A `typeForSlug` callback is synchronous and nothing in this runtime can block on a promise, so
+   * this runs on the arrived payload — the page, the change batch — before the model factories
+   * read a slug out of it.
+   */
+  private async ensureSlugsKnown(slugs: Iterable<string>): Promise<void> {
+    const missing = [...slugs].filter(
+      (s) => s && !this.typeBySlug.has(s) && !this.unresolvedSlugs.has(s),
+    );
+    if (missing.length === 0) return;
+    await this.loadRequestFields();
+    for (const s of missing) if (!this.typeBySlug.has(s)) this.unresolvedSlugs.add(s);
   }
 
   // ── connections (heavily rate-limited — initial sync / reconciliation) ─────
@@ -282,8 +431,8 @@ export class Client {
   async *connections(limit: number = DEFAULT_CONN_PAGE, offset: number = 0): AsyncGenerator<Connection> {
     const page = Math.max(1, Math.trunc(limit));
     let cur = Math.max(0, Math.trunc(offset));
-    // Ensure the slug catalog is loaded so values are typed correctly.
-    await this.requestFields();
+    // Hold the catalog and a registry that carries its types before any value is typed.
+    await this.prepareTyping();
 
     let total: number | null = null;
     for (;;) {
@@ -293,10 +442,14 @@ export class Client {
       if (items.length === 0) {
         return;
       }
+      // The page is the payload: a slot it names that the held catalog does not carry is healed
+      // here, before a factory reads that slug out of it.
+      await this.ensureSlugsKnown(valueSlugs(items));
       for (const obj of items) {
         if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) continue;
         yield Connection.fromApi(obj as Record<string, unknown>, {
           typeForSlug: this.typeForSlug,
+          fieldTypes: this.loadedFieldTypes(),
           decryptValue: this.decryptValue,
           binaryFetch: this.binaryFetch,
           // The list row carries identity (displayName/connectedAt) AND the values
@@ -342,7 +495,7 @@ export class Client {
    * `null` (the list endpoint carries them).
    */
   async connection(id: string): Promise<Connection> {
-    await this.requestFields();
+    await this.prepareTyping();
     let body = await this.http.get(`${CONNECTIONS}/${id}`);
     if (
       body !== null &&
@@ -355,8 +508,12 @@ export class Client {
       const items = listItems(body);
       body = items.length > 0 ? items[0] : {};
     }
+    // The connection is the payload: a slot it names that the held catalog does not carry is
+    // healed here, before a factory reads that slug out of it.
+    await this.ensureSlugsKnown(valueSlugs([body]));
     return Connection.fromApi(body as Record<string, unknown>, {
       typeForSlug: this.typeForSlug,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: this.decryptValue,
       binaryFetch: this.binaryFetch,
     });
@@ -402,7 +559,14 @@ export class Client {
       items = body ?? [];
     }
     if (!Array.isArray(items)) return [];
-    return items.filter((o): o is Record<string, unknown> => o !== null && typeof o === 'object' && !Array.isArray(o));
+    const events = items.filter(
+      (o): o is Record<string, unknown> => o !== null && typeof o === 'object' && !Array.isArray(o),
+    );
+    // The batch is the payload: a slot it names that the held catalog does not carry is healed
+    // here, on the drain, before the pump hands an event to the synchronous decrypt callback.
+    // Buffer replay and dead-letter re-drive deliver events that already passed through here.
+    await this.ensureSlugsKnown(changeSlugs(events));
+    return events;
   }
 
   /**
@@ -434,6 +598,7 @@ export class Client {
     }
     return Change.fromApi(event, {
       typeForSlug: this.typeForSlug,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: this.decryptValue,
       binaryFetch: this.binaryFetch,
     });
@@ -449,13 +614,13 @@ export class Client {
    * `batchSize` (≤500), `maxRetries`, `onError` (`deadletter`|`halt`), `backoff`.
    */
   async processChanges(handler: Handler, options: ProcessOptions = {}): Promise<void> {
-    await this.requestFields(); // ensure the catalog is loaded for value typing
+    await this.prepareTyping(); // the catalog and its registry, before any change is typed
     await this.pump.processChanges(handler, options);
   }
 
   /** Raw, UNBUFFERED drain → `Change[]` (advanced — you own durability). */
   async drainBatch(max: number = DEFAULT_CONN_PAGE): Promise<Change[]> {
-    await this.requestFields();
+    await this.prepareTyping();
     return this.pump.drainBatch(max);
   }
 
@@ -466,7 +631,7 @@ export class Client {
 
   /** Re-drive dead-lettered events through `handler`. */
   async retryDeadLetters(handler: Handler, options: ProcessOptions = {}): Promise<number> {
-    await this.requestFields();
+    await this.prepareTyping();
     return this.pump.retryDeadLetters(handler, options);
   }
 
@@ -477,24 +642,48 @@ export class Client {
     return verifyWebhook(rawBody, headers, this.config);
   }
 
-  /** Parse a webhook body → a typed {@link Change}. */
-  parseWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Change {
-    return parseWebhook(rawBody, headers, this.config, {
+  /**
+   * Parse a webhook body → a typed {@link Change}.
+   *
+   * A webhook body is a payload like any other, so it triggers the same bounded heal: it is
+   * decoded first, and the slug it names drives one catalog refetch and, through it, one registry
+   * refetch, before any value is typed. Awaiting is what makes that possible in this runtime —
+   * the model factories stay synchronous and read the healed state.
+   *
+   * The standalone `parseWebhook` export takes its own resolver and registry and heals nothing;
+   * it is for a receiver that holds no client.
+   */
+  async parseWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Promise<Change> {
+    // `headers` is part of the webhook contract (verify reads them; parse keeps the symmetric
+    // signature) but the body/envelope decode is header-independent.
+    void headers;
+    const payload = decodeWebhookPayload(rawBody, this.config, this.accountKey);
+    await this.healPayload(payload);
+    return Change.fromApi(payload, {
       typeForSlug: this.typeForSlug,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: this.decryptValue,
       binaryFetch: this.binaryFetch,
-      accountKey: this.accountKey, // cached once; no per-webhook PBKDF2
     });
   }
 
-  /** Verify + parse a webhook in one call → {@link Change}. */
-  handleWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Change {
-    return handleWebhook(rawBody, headers, this.config, {
-      typeForSlug: this.typeForSlug,
-      decryptValue: this.decryptValue,
-      binaryFetch: this.binaryFetch,
-      accountKey: this.accountKey, // cached once; no per-webhook PBKDF2
-    });
+  /** Verify + parse a webhook in one call → {@link Change} (same heal as {@link parseWebhook}). */
+  async handleWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Promise<Change> {
+    if (!verifyWebhook(rawBody, headers, this.config)) {
+      throw new WebhookError('webhook signature verification failed');
+    }
+    return this.parseWebhook(rawBody, headers);
+  }
+
+  /**
+   * Hold the catalog and a registry that carries the types of everything this event names.
+   *
+   * Both legs of the heal, on the arrived payload: the catalog leg first, then the slug the event
+   * names, whose refetch also carries its type into the registry.
+   */
+  private async healPayload(payload: Record<string, unknown>): Promise<void> {
+    await this.prepareTyping();
+    await this.ensureSlugsKnown(changeSlugs([payload]));
   }
 
   // ── company documents (write) ───────────────────────────────────────────────
@@ -1062,9 +1251,22 @@ export class Client {
       // Validate the plaintext against the field's declared type (resolved from the
       // pinned flow definition) before it is encrypted. A slug with no field element in the
       // graph resolves to null → skipped (do not invent a type).
-      const ftype = flowFieldType(run.definition, slug);
-      if (ftype !== null && !isFieldValueValid(ftype, plain)) {
-        throw new ValidationError(slug, ftype);
+      const element = flowFieldElement(run.definition, slug);
+      const ftype = element !== null && element['field_type'] != null
+        ? String(element['field_type'])
+        : null;
+      if (element !== null && ftype !== null) {
+        // The type is named by the pinned definition — a payload, not the request catalog — so it
+        // can be one the held registry has never seen. One bounded refetch resolves it; a type
+        // still absent afterwards validates as unknown, which accepts anything.
+        await this.ensureTypesKnown([ftype]);
+        // A choice type whose ROW carries no options takes them from the ELEMENT, which is the
+        // only place they exist for `select`/`multiselect`. Passing them is what lets the answer
+        // be validated at all instead of being measured against an empty domain.
+        const options = flowFieldOptions(element);
+        if (!(await this.fieldTypes()).isFieldValueValid(ftype, plain, options)) {
+          throw new ValidationError(slug, ftype);
+        }
       }
       const values: Json[] = [];
       for (const uid of Object.values(run.bindings)) {
@@ -1236,12 +1438,12 @@ function partyOf(definition: Json, nodeKey: string): string | null {
 }
 
 /**
- * Resolve a fill slug to its `field_type` from the pinned flow graph.
+ * Resolve a fill slug to its field ELEMENT in the pinned flow graph.
  * Scans every node's `elements` for a `kind='field'` element with a matching
  * `slug`. Returns `null` when the slug has no field element (skip validation —
  * never invent a type).
  */
-function flowFieldType(definition: Json, slug: string): string | null {
+function flowFieldElement(definition: Json, slug: string): Json | null {
   const nodes = definition['nodes'];
   if (!Array.isArray(nodes)) return null;
   for (const n of nodes) {
@@ -1255,12 +1457,30 @@ function flowFieldType(definition: Json, slug: string): string | null {
         (el as Json)['kind'] === 'field' &&
         (el as Json)['slug'] === slug
       ) {
-        const ft = (el as Json)['field_type'];
-        return ft != null ? String(ft) : null;
+        return el as Json;
       }
     }
   }
   return null;
+}
+
+/**
+ * The option VALUES a flow field element supplies.
+ *
+ * An element's options are `{value, label, available_if?}` objects; the value is the domain
+ * member. `null` when the element carries none, which leaves the row's own options — if it has
+ * any — to govern.
+ */
+function flowFieldOptions(element: Json): string[] | null {
+  const raw = element['options'];
+  if (!Array.isArray(raw)) return null;
+  const values: string[] = [];
+  for (const option of raw) {
+    if (option === null || typeof option !== 'object') continue;
+    const value = (option as Json)['value'];
+    if (value !== undefined && value !== null) values.push(String(value));
+  }
+  return values.length > 0 ? values : null;
 }
 
 /** Build a `data:<mime>;base64,<…>` URI for the per-person file envelope. */
@@ -1323,6 +1543,28 @@ function listItems(body: unknown): unknown[] {
   }
   if (Array.isArray(body)) return body;
   return [];
+}
+
+/** Every request-slot slug a connection payload keys a value under. */
+function valueSlugs(items: unknown[]): string[] {
+  const out: string[] = [];
+  for (const item of items) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+    const values = (item as Record<string, unknown>)['values'];
+    if (values === null || typeof values !== 'object' || Array.isArray(values)) continue;
+    out.push(...Object.keys(values as Record<string, unknown>));
+  }
+  return out;
+}
+
+/** Every request-slot slug a change batch names. */
+function changeSlugs(events: Record<string, unknown>[]): string[] {
+  const out: string[] = [];
+  for (const event of events) {
+    const slug = event['slug'];
+    if (typeof slug === 'string' && slug !== '') out.push(slug);
+  }
+  return out;
 }
 
 /** Read the `total` count out of a `{total, items}` list response (or keep the prior). */

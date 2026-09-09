@@ -15,8 +15,8 @@ re-serialize a parsed body — the HMAC is over the exact bytes sent.
 
 ```ts
 client.verifyWebhook(rawBody: Buffer | Uint8Array | string, headers): boolean
-client.parseWebhook(rawBody, headers):  Change
-client.handleWebhook(rawBody, headers): Change   // verify + parse
+await client.parseWebhook(rawBody, headers):  Change
+await client.handleWebhook(rawBody, headers): Change   // verify + parse
 ```
 
 | Method | Returns | Errors |
@@ -25,24 +25,26 @@ client.handleWebhook(rawBody, headers): Change   // verify + parse
 | `parseWebhook` | a typed `Change`. Does **not** verify. Handles JSON, XML, and the `encrypt_payload` account-key envelope. | `WebhookError` on a malformed/unparseable body or envelope. |
 | `handleWebhook` | a typed `Change` — verify **then** parse. | `WebhookError` on a bad/unknown signature, or any `parseWebhook` error. |
 
-> The client webhook methods are **synchronous** but need the request-fields catalog
-> (to type the value). Call `await client.requestFields()` once at startup so the
-> catalog is cached — the methods then make no network calls. `headers` may be a
+> `parseWebhook`/`handleWebhook` are **async**: a webhook body is a payload like any other,
+> so a slug it names that the held catalog does not carry triggers one bounded catalog
+> refetch and, through it, one registry refetch — before the value is typed. Awaiting is
+> what makes that heal possible here. `verifyWebhook` stays synchronous and makes no
+> network call at all. `headers` may be a
 > plain object or a Node `IncomingHttpHeaders` (case-insensitive lookup; array
 > header values use the first element).
 
 ## Standalone functions
 
 The same three are importable as module functions. They take the `config` and the
-decrypt/type closures explicitly — used by `Client` internally; you'll normally use
-the client methods inside an app.
+decrypt/type closures explicitly, and heal nothing — they are for a receiver that holds
+no client; you'll normally use the client methods inside an app.
 
 ```ts
 import { verifyWebhook, parseWebhook, handleWebhook } from '@allus-fyi/company-data';
 
 verifyWebhook(rawBody, headers, config): boolean
-parseWebhook(rawBody, headers, config, { typeForSlug, decryptValue, binaryFetch?, accountKey? }): Change
-handleWebhook(rawBody, headers, config, { typeForSlug, decryptValue, binaryFetch?, accountKey? }): Change
+parseWebhook(rawBody, headers, config, { typeForSlug, fieldTypes, decryptValue, binaryFetch?, accountKey? }): Change
+handleWebhook(rawBody, headers, config, { typeForSlug, fieldTypes, decryptValue, binaryFetch?, accountKey? }): Change
 ```
 
 ## In a web route
@@ -55,13 +57,13 @@ import { Client, WebhookError } from '@allus-fyi/company-data';
 
 const app = express();
 const client = Client.fromConfig('allus.json');
-await client.requestFields();   // warm the catalog (the webhook methods are sync)
+await client.requestFields();   // optional: warm the catalog so the first webhook doesn't pay for it
 
 // Capture the RAW body bytes — do NOT let a JSON parser replace them.
-app.post('/allus/webhook', express.raw({ type: '*/*' }), (req, res) => {
+app.post('/allus/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   let change;
   try {
-    change = client.handleWebhook(req.body, req.headers);
+    change = await client.handleWebhook(req.body, req.headers);
   } catch (e) {
     if (e instanceof WebhookError) return res.sendStatus(401);
     throw e;
@@ -84,10 +86,10 @@ await client.requestFields();
 // Keep the raw body: a contentTypeParser that returns the Buffer untouched.
 app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
 
-app.post('/allus/webhook', (req, reply) => {
+app.post('/allus/webhook', async (req, reply) => {
   let change;
   try {
-    change = client.handleWebhook(req.body as Buffer, req.headers);
+    change = await client.handleWebhook(req.body as Buffer, req.headers);
   } catch (e) {
     if (e instanceof WebhookError) return reply.code(401).send();
     throw e;
@@ -101,7 +103,7 @@ Split the steps if you prefer:
 
 ```ts
 if (!client.verifyWebhook(rawBody, headers)) return res.sendStatus(401);
-const change = client.parseWebhook(rawBody, headers);
+const change = await client.parseWebhook(rawBody, headers);
 ```
 
 ## Delivery contract — effectively unique, rarely replayed

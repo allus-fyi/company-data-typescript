@@ -24,7 +24,7 @@ import { join } from 'node:path';
 
 import { Client, Config, ConfigError, HttpClient, WebhookError, decrypt, handleWebhook, parseWebhook, verifyWebhook } from '../src/index.js';
 import type { EncWrapper, Headers, HttpResponse, HttpTransport } from '../src/index.js';
-import { loadVector, loadVectorPrivateKey } from './helpers.js';
+import { loadVector, loadVectorPrivateKey, testFieldTypes, testFieldTypeRows } from './helpers.js';
 
 const vector = loadVector();
 const SECRET = 'wh_secret_abc123';
@@ -142,7 +142,7 @@ test('parse plain JSON body', () => {
   withTmp((dir) => {
     const config = makeConfig(dir);
     const body = changeBody();
-    const change = parseWebhook(body, headers(body), config, { typeForSlug, decryptValue });
+    const change = parseWebhook(body, headers(body), config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue });
     assert.equal(change.id, 'chg-1');
     assert.equal(change.event, 'field_updated');
     assert.equal(change.personId, 'person-1');
@@ -170,7 +170,7 @@ test('parse XML body', () => {
         '</response>',
       'utf8',
     );
-    const change = parseWebhook(xml, headers(xml), config, { typeForSlug, decryptValue });
+    const change = parseWebhook(xml, headers(xml), config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue });
     assert.equal(change.id, 'chg-7');
     assert.equal(change.event, 'field_updated');
     assert.equal(change.slug, 'work_email');
@@ -216,7 +216,7 @@ test('parse account-key envelope', () => {
     const h = headers(body); // HMAC is over the envelope (the final body)
 
     assert.equal(verifyWebhook(body, h, config), true);
-    const change = parseWebhook(body, h, config, { typeForSlug, decryptValue });
+    const change = parseWebhook(body, h, config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue });
     assert.equal(change.id, 'chg-1');
     assert.equal(change.event, 'field_updated');
     assert.equal(change.slug, 'work_email');
@@ -230,7 +230,7 @@ test('parse account envelope without account key raises', () => {
     const config = makeConfig(dir); // no account_private_key
     const { publicKey } = makeAccountKey(dir, 'x');
     const body = wrapToAccountKey(publicKey, changeBody());
-    assert.throws(() => parseWebhook(body, headers(body), config, { typeForSlug, decryptValue }), WebhookError);
+    assert.throws(() => parseWebhook(body, headers(body), config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue }), WebhookError);
   });
 });
 
@@ -240,7 +240,7 @@ test('handle verify then parse', () => {
   withTmp((dir) => {
     const config = makeConfig(dir);
     const body = changeBody();
-    const change = handleWebhook(body, headers(body), config, { typeForSlug, decryptValue });
+    const change = handleWebhook(body, headers(body), config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue });
     assert.equal(change.id, 'chg-1');
   });
 });
@@ -251,7 +251,7 @@ test('handle bad signature raises', () => {
     const body = changeBody();
     const h = headers(body);
     h['X-Allus-Signature'] = 'deadbeef';
-    assert.throws(() => handleWebhook(body, h, config, { typeForSlug, decryptValue }), WebhookError);
+    assert.throws(() => handleWebhook(body, h, config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue }), WebhookError);
   });
 });
 
@@ -261,6 +261,16 @@ class TokenResp implements HttpResponse {
   status = 200;
   async text(): Promise<string> {
     return '{"access_token":"t","token_type":"Bearer","expires_in":3600}';
+  }
+  get headers(): { get(name: string): string | null } {
+    return { get: () => null };
+  }
+}
+
+class FieldTypesResp implements HttpResponse {
+  status = 200;
+  async text(): Promise<string> {
+    return JSON.stringify(testFieldTypeRows());
   }
   get headers(): { get(name: string): string | null } {
     return { get: () => null };
@@ -288,6 +298,7 @@ test('client methods delegate', async () => {
         return new TokenResp();
       },
       async get(url) {
+        if (url.endsWith('/api/contact-field-types')) return new FieldTypesResp();
         assert.ok(url.endsWith('/request-fields'), `unexpected GET ${url}`);
         catalogCalls.n += 1;
         return new RFResp();
@@ -301,15 +312,13 @@ test('client methods delegate', async () => {
     assert.equal(client.verifyWebhook(body, h), true);
     assert.equal(catalogCalls.n, 0);
 
-    // handleWebhook needs the catalog (one lazy fetch) — but it's async there. The
-    // Client method is sync; ensure the catalog is loaded first.
-    await client.requestFields();
-    const change = client.handleWebhook(body, h);
+    // handleWebhook heals before typing, so it holds the catalog itself (one lazy fetch).
+    const change = await client.handleWebhook(body, h);
     assert.equal(change.id, 'chg-1');
     assert.equal(change.value, vector.text.plaintext);
     assert.equal(catalogCalls.n, 1);
     // A second webhook reuses the cached catalog (no further HTTP).
-    client.handleWebhook(body, h);
+    await client.handleWebhook(body, h);
     assert.equal(catalogCalls.n, 1);
   });
 });
@@ -326,6 +335,7 @@ test('account key loaded once and reused', async () => {
         return new TokenResp();
       },
       async get(url) {
+        if (url.endsWith('/api/contact-field-types')) return new FieldTypesResp();
         assert.ok(url.endsWith('/request-fields'));
         return new RFResp();
       },
@@ -344,7 +354,7 @@ test('account key loaded once and reused', async () => {
     const body = wrapToAccountKey(publicKey, inner);
     const h = headers(body);
     for (let i = 0; i < 3; i++) {
-      const change = client.handleWebhook(body, h);
+      const change = await client.handleWebhook(body, h);
       assert.equal(change.id, 'chg-1');
       assert.equal(change.value, vector.text.plaintext);
     }
@@ -356,7 +366,7 @@ test('parseWebhook loads account key when not supplied (standalone)', () => {
     const { path: accountPem, publicKey } = makeAccountKey(dir, 'acctpp');
     const config = makeConfig(dir, { accountPrivateKey: accountPem, accountPassphrase: 'acctpp' });
     const body = wrapToAccountKey(publicKey, changeBody());
-    const change = parseWebhook(body, headers(body), config, { typeForSlug, decryptValue }); // no accountKey dep → loaded on demand
+    const change = parseWebhook(body, headers(body), config, { typeForSlug, fieldTypes: testFieldTypes(), decryptValue }); // no accountKey dep → loaded on demand
     assert.equal(change.id, 'chg-1');
     assert.equal(change.value, vector.text.plaintext);
   });

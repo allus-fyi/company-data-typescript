@@ -42,6 +42,7 @@ import { readFileSync } from 'node:fs';
 import { Config } from './config.js';
 import { GCM_IV_LEN, GCM_TAG_LEN, type EncWrapper, type BinaryFetch, type DecryptWrapper } from './crypto.js';
 import { WebhookError } from './errors.js';
+import { FieldTypeRegistry } from './fieldTypes.js';
 import { Change, type TypeForSlug } from './models.js';
 import { parseXml } from './xml.js';
 
@@ -55,6 +56,8 @@ export type Headers = Record<string, string | string[] | undefined>;
 
 interface ParseDeps {
   typeForSlug: TypeForSlug;
+  /** The served registry, which says what the type means. */
+  fieldTypes: FieldTypeRegistry;
   decryptValue: DecryptWrapper;
   binaryFetch?: BinaryFetch | null;
   /** A pre-loaded account private key the Client caches; loaded on demand otherwise. */
@@ -186,15 +189,9 @@ export function parseWebhook(
   // symmetric signature) but the body/envelope decode is header-independent — the
   // encrypt_payload envelope is self-describing (`{"_enc":1,…}`).
   void headers;
-  const body = asBytes(rawBody);
-  const payload = decodePayload(body, config, deps.accountKey);
-
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new WebhookError('webhook payload is not a JSON/XML object');
-  }
-
-  return Change.fromApi(payload as Record<string, unknown>, {
+  return Change.fromApi(decodeWebhookPayload(rawBody, config, deps.accountKey), {
     typeForSlug: deps.typeForSlug,
+    fieldTypes: deps.fieldTypes,
     decryptValue: deps.decryptValue,
     binaryFetch: deps.binaryFetch,
   });
@@ -221,6 +218,25 @@ export function handleWebhook(
 }
 
 // ── payload decoding (JSON / XML / encrypt_payload envelope) ────────────────────
+
+/**
+ * Decode a webhook body into the raw event object — JSON, XML, or an `encrypt_payload`
+ * account-key envelope unwrapped with the configured account key.
+ *
+ * Exported because a caller that HEALS before typing needs the event's slug before any model is
+ * built, and the slug is only readable once the body is decoded.
+ */
+export function decodeWebhookPayload(
+  rawBody: Buffer | Uint8Array | string,
+  config: Config,
+  accountKey?: KeyObject | null,
+): Record<string, unknown> {
+  const payload = decodePayload(asBytes(rawBody), config, accountKey);
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new WebhookError('webhook payload is not a JSON/XML object');
+  }
+  return payload as Record<string, unknown>;
+}
 
 function decodePayload(body: Buffer, config: Config, accountKey?: KeyObject | null): unknown {
   const text = body.toString('utf8').trim();

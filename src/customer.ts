@@ -17,7 +17,7 @@ import type { KeyObject } from 'node:crypto';
 import { Config } from './config.js';
 import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
 import { ConfigError, ValidationError } from './errors.js';
-import { isFieldValueValid } from './fieldValidation.js';
+import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { Change, Document, FlowRun } from './models.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
@@ -28,6 +28,7 @@ const CONN = '/api/company-connections';
 const CONSENTS = `${CONN}/consents`;
 const CUSTOMER_CHANGES = '/api/customer/changes';
 const KEYS = '/api/keys';
+const FIELD_TYPES = '/api/contact-field-types';
 const DEFAULT_PAGE = 100;
 
 const defaultSleep = (seconds: number): Promise<void> =>
@@ -148,6 +149,15 @@ export class CustomerClient {
   // "companyCode/serviceCode" → {request_field_id: field_type}, resolved from the
   // connect-screen lookup for typed-answer validation.
   private readonly requestTypeCache = new Map<string, Record<string, string>>();
+
+  // The field-type registry, fetched beside the request-field lookup and held for the life of the
+  // client. A type it does not carry triggers ONE refetch; a type a refetch still does not resolve
+  // is remembered in `unresolvedTypes` and never asked for again.
+  private cachedFieldTypes: FieldTypeRegistry | null = null;
+  private readonly unresolvedTypes = new Set<string>();
+  // The last registry load's failure, held so a synchronous reader raises it instead of reading
+  // an empty registry. Cleared by the first load that succeeds.
+  private fieldTypesFailure: unknown = null;
   private _pump: Pump | null = null;
 
   constructor(config: Config, opts: CustomerClientOptions = {}) {
@@ -374,6 +384,7 @@ export class CustomerClient {
     }
     return Change.fromApi(event, {
       typeForSlug: () => null,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: (w) => this.decryptAccount(w),
     });
   }
@@ -403,6 +414,7 @@ export class CustomerClient {
   parseWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Change {
     return parseWebhook(rawBody, headers, this.config, {
       typeForSlug: () => null,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: (w) => this.decryptAccount(w),
       accountKey: this.accountKey,
     });
@@ -411,9 +423,76 @@ export class CustomerClient {
   handleWebhook(rawBody: Buffer | Uint8Array | string, headers: Headers): Change {
     return handleWebhook(rawBody, headers, this.config, {
       typeForSlug: () => null,
+      fieldTypes: this.loadedFieldTypes(),
       decryptValue: (w) => this.decryptAccount(w),
       accountKey: this.accountKey,
     });
+  }
+
+  /**
+   * The field-type registry — what every TYPE in a request catalog means.
+   *
+   * Fetched from `GET /api/contact-field-types` beside the connect-screen lookup this client
+   * resolves a request row's type from, and held in memory for the life of the client. It is what
+   * validates a typed answer before it is encrypted.
+   */
+  async fieldTypes(): Promise<FieldTypeRegistry> {
+    if (this.cachedFieldTypes === null) {
+      this.cachedFieldTypes = await this.loadFieldTypes();
+    }
+    return this.cachedFieldTypes;
+  }
+
+  /**
+   * One fetch of the registry rows, with no caching of its own.
+   *
+   * A failure is remembered as a failure: re-thrown to the caller that asked, and recorded so a
+   * synchronous reader raises it too rather than reading an empty registry, whose "accept
+   * anything" answer for an unknown type would be indistinguishable from a real one.
+   */
+  private async loadFieldTypes(): Promise<FieldTypeRegistry> {
+    try {
+      // The registry route answers JSON to every caller — it is not one of the customer routes
+      // that honour the configured `format` — so its body is parsed as JSON whatever this client
+      // speaks elsewhere.
+      const body = this.http.parseBody(await this.http.getResponse(FIELD_TYPES), false);
+      const registry = new FieldTypeRegistry(Array.isArray(body) ? (body as FieldTypeRow[]) : []);
+      this.fieldTypesFailure = null;
+      return registry;
+    } catch (exc) {
+      this.fieldTypesFailure = exc;
+      throw exc;
+    }
+  }
+
+  /**
+   * One bounded refetch when the held registry does not carry a type in use.
+   *
+   * The refetch replaces the held registry only once it has arrived, so a refetch that fails
+   * leaves the rows already loaded standing.
+   */
+  private async ensureTypesKnown(types: Iterable<string>): Promise<void> {
+    let registry = await this.fieldTypes();
+    const missing = [...types].filter(
+      (t) => t && !registry.knows(t) && !this.unresolvedTypes.has(t),
+    );
+    if (missing.length === 0) return;
+    registry = await this.loadFieldTypes();
+    this.cachedFieldTypes = registry;
+    for (const t of missing) if (!registry.knows(t)) this.unresolvedTypes.add(t);
+  }
+
+  /**
+   * The registry the sync webhook parsers read; loaded by the request-field lookup.
+   *
+   * A load that FAILED raises that failure rather than answering an empty registry — "unknown
+   * accepts anything" is a verdict about the deployment, never a stand-in for a fetch that did
+   * not happen. A client that never asked for the registry reads the empty one.
+   */
+  private loadedFieldTypes(): FieldTypeRegistry {
+    if (this.cachedFieldTypes !== null) return this.cachedFieldTypes;
+    if (this.fieldTypesFailure !== null) throw this.fieldTypesFailure;
+    return new FieldTypeRegistry();
   }
 
   // ── internals ────────────────────────────────────────────────────────────────
@@ -447,6 +526,10 @@ export class CustomerClient {
     } catch {
       // best-effort — a failed lookup skips validation
     }
+    // Cached only once the registry carries the types the lookup named: a cache published ahead
+    // of a failed heal is never retried, and every answer it types is then validated against a
+    // registry that does not know the type.
+    await this.ensureTypesKnown(Object.values(out));
     this.requestTypeCache.set(key, out);
     return out;
   }
@@ -462,10 +545,11 @@ export class CustomerClient {
     // encryption. The type is resolved server-side from the connect-screen lookup
     // (cached per service); an answer whose type can't be resolved is skipped.
     const types = await this.requestFieldTypes(companyCode, serviceCode);
+    const registry = await this.fieldTypes();
     return answers.map((a) => {
       const plain = String(a.value);
       const ft = types[a.request_field_id];
-      if (ft && !isFieldValueValid(ft, plain)) {
+      if (ft && !registry.isFieldValueValid(ft, plain)) {
         throw new ValidationError(a.request_field_id, ft);
       }
       return {

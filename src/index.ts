@@ -62,13 +62,23 @@ export {
   ValidationError,
 } from './errors.js';
 
-// field-type value validation
+// the field-type registry (value shape + value validation)
 export {
-  isFieldValueValid,
-  fieldValueError,
-  isValidCountryCode,
-  dialCodeFor,
-} from './fieldValidation.js';
+  FieldTypeRegistry,
+  LANES,
+  INPUTS,
+  CHECKS,
+  INPUT_LANES,
+  ENTRY_INPUTS,
+  ENVELOPE_MEMBERS,
+  PAGE_MEMBERS,
+  PAGE_LABELS,
+  MAX_VALIDATION_LENGTH,
+} from './fieldTypes.js';
+export type { FieldTypeRow, SubFieldEntry, ResolvedFieldType } from './fieldTypes.js';
+
+// country helpers
+export { isValidCountryCode, dialCodeFor } from './fieldValidation.js';
 
 // transport
 export { HttpClient, FetchTransport } from './http.js';
@@ -84,9 +94,6 @@ export {
   FlowRun,
   FlowRunParticipant,
   LogEntry,
-  STRUCTURED_TYPES,
-  BINARY_TYPES,
-  DATE_TYPES,
 } from './models.js';
 export type { TypeForSlug } from './models.js';
 
@@ -113,7 +120,7 @@ export type {
 } from './pump.js';
 
 // webhook receiver helpers
-export { verifyWebhook, parseWebhook, handleWebhook, loadAccountKey } from './webhooks.js';
+export { verifyWebhook, parseWebhook, handleWebhook, decodeWebhookPayload, loadAccountKey } from './webhooks.js';
 export type { Headers } from './webhooks.js';
 
 // "Sign in with allme" — RP-side OAuth

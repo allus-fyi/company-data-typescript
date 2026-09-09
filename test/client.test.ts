@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { ApiError, BinaryHandle, Change, Client, Config, ConfigError, Connection, Document, HttpClient, LogEntry, RequestField, decrypt, loadPrivateKey } from '../src/index.js';
 import type { HttpResponse, HttpTransport, RequestBody, EncWrapper } from '../src/index.js';
 import { createPublicKey } from 'node:crypto';
-import { encryptForKey, loadVector } from './helpers.js';
+import { encryptForKey, loadVector, testFieldTypes, testFieldTypeRows } from './helpers.js';
 
 const vector = loadVector();
 
@@ -155,6 +155,7 @@ test('requestFields parsed and cached', async () => {
     const config = makeConfig(dir);
     const calls = { requestFields: 0 };
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) {
         calls.requestFields += 1;
         return new FakeResponse(200, REQUEST_FIELDS_BODY);
@@ -195,6 +196,7 @@ test('connections yields typed decrypted', async () => {
       ],
     };
     const { client, transport } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/connections')) return new FakeResponse(200, page1);
       throw new Error('unexpected GET ' + url);
@@ -236,6 +238,7 @@ test('connections auto-pages (honors total / short page)', async () => {
     ];
     let pageIdx = 0;
     const { client, transport } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, { request_fields: [] });
       if (url.endsWith('/connections')) return new FakeResponse(200, pages[pageIdx++]);
       throw new Error('unexpected GET ' + url);
@@ -255,6 +258,7 @@ test('connections stops at total without an extra fetch', async () => {
     // total=2, page size 2, one full page that exactly covers `total` → must NOT
     // fetch a second page (the over-fetch the task warns against).
     const { client, transport } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, { request_fields: [] });
       if (url.endsWith('/connections')) return new FakeResponse(200, { total: 2, items: [makeItem(1), makeItem(2)] });
       throw new Error('unexpected GET ' + url);
@@ -284,6 +288,7 @@ test('binary handle fetches slot and decrypts', async () => {
       ],
     };
     const { client, transport } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/connections')) return new FakeResponse(200, page);
       if (url.endsWith('/slots/sf-9/file')) return new FakeResponse(200, { encrypted: true, value: vector.binary.wrapper });
@@ -324,6 +329,7 @@ test('binary handle serves plaintext bytes', async () => {
     const bytes = Buffer.from('ffd8ffe06e6f742d7265616c6c792d612d6a706567', 'hex');
     const digest = createHash('sha256').update(bytes).digest('hex');
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/connections')) return new FakeResponse(200, page);
       if (url.endsWith('/slots/sf-9/file')) {
@@ -396,6 +402,7 @@ test('binary handle expired answer carries digest', async () => {
       ],
     };
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/connections')) return new FakeResponse(200, page);
       return new FakeResponse(410, {
@@ -435,6 +442,7 @@ test('connection by id', async () => {
       values: { work_email: { value: vector.text.wrapper, live: true } },
     };
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/connections/csc-7')) return new FakeResponse(200, detail);
       throw new Error('unexpected GET ' + url);
@@ -478,6 +486,7 @@ test('processChanges drains through pump', async () => {
     const config = makeConfig(dir);
     let served = false;
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, REQUEST_FIELDS_BODY);
       if (url.endsWith('/changes')) {
         if (served) return new FakeResponse(200, { changes: [] });
@@ -900,6 +909,7 @@ test('document_status_changed feed event parses into a Change', async () => {
     const config = makeConfig(dir);
     let served = false;
     const { client } = makeClient(config, (url) => {
+      if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, { request_fields: [] });
       if (url.endsWith('/changes')) {
         if (served) return new FakeResponse(200, { changes: [] });
@@ -971,7 +981,7 @@ test('sendConnectRequest missing request_id throws ApiError', async () => {
 });
 
 test('Change parses connect-request outcome events (request_id, no slug/value)', () => {
-  const opts = { typeForSlug: () => null, decryptValue: (v: unknown) => String(v) };
+  const opts = { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue: (v: unknown) => String(v) };
 
   const accepted = Change.fromApi(
     {

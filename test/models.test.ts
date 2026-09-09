@@ -25,7 +25,7 @@ import {
   loadPublicKey,
 } from '../src/index.js';
 import type { BinaryFetchResult, EncWrapper } from '../src/index.js';
-import { encryptForKey, loadVector, loadVectorPrivateKey } from './helpers.js';
+import { encryptForKey, loadVector, loadVectorPrivateKey, testFieldTypes, testFieldTypeRows } from './helpers.js';
 
 const vector = loadVector();
 const privateKey = loadVectorPrivateKey(vector);
@@ -79,7 +79,7 @@ test('connection detail typed + slug-keyed', () => {
   };
   const identity = { display_name: 'Anna', connected_at: '2026-06-10T00:00:00Z' };
 
-  const conn = Connection.fromApi(detail, { typeForSlug: typeResolver(), decryptValue, identity });
+  const conn = Connection.fromApi(detail, { typeForSlug: typeResolver(), fieldTypes: testFieldTypes(), decryptValue, identity });
 
   assert.equal(conn.id, 'csc-1');
   assert.equal(conn.personId, 'person-1');
@@ -117,7 +117,7 @@ test('binary handle lazy fetch and decrypt', async () => {
     user_id: 'person-1',
     values: { logo: { value_url: 'https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file', live: true, updatedAt: '2026-06-14T07:00:00Z' } },
   };
-  const conn = Connection.fromApi(detail, { typeForSlug: () => 'photo', decryptValue, binaryFetch: fetch });
+  const conn = Connection.fromApi(detail, { typeForSlug: () => 'photo', fieldTypes: testFieldTypes(), decryptValue, binaryFetch: fetch });
   const handle = conn.values.logo.value as BinaryHandle;
   assert.ok(handle instanceof BinaryHandle);
   assert.equal(captured.url, undefined); // not fetched until .bytes()
@@ -136,7 +136,7 @@ test('connection has no person source field', () => {
     user_id: 'person-1',
     values: { work_email: { value: vector.text.wrapper, live: true } },
   };
-  const conn = Connection.fromApi(detail, { typeForSlug: () => 'email', decryptValue });
+  const conn = Connection.fromApi(detail, { typeForSlug: () => 'email', fieldTypes: testFieldTypes(), decryptValue });
   const serialized = JSON.stringify(conn.raw);
   assert.ok(!serialized.includes('field_id'));
   assert.deepEqual(Object.keys(conn.values), ['work_email']);
@@ -151,7 +151,7 @@ test('change field_updated typed and id populated', () => {
       { id: 'chg-43', event: 'connection_created', person_user_id: 'person-2', at: '2026-06-17T12:05:00Z' },
     ],
   };
-  const changes = Change.listFromApi(body, { typeForSlug: () => 'email', decryptValue });
+  const changes = Change.listFromApi(body, { typeForSlug: () => 'email', fieldTypes: testFieldTypes(), decryptValue });
 
   const f = changes[0];
   assert.equal(f.id, 'chg-42'); // stable dedup key
@@ -178,7 +178,7 @@ test('change field_updated binary is a lazy handle', async () => {
     ],
   };
   const fetch = (): BinaryFetchResult => ({ encrypted: true, wrapper: vector.binary.wrapper });
-  const [chg] = Change.listFromApi(body, { typeForSlug: () => 'photo', decryptValue, binaryFetch: fetch });
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => 'photo', fieldTypes: testFieldTypes(), decryptValue, binaryFetch: fetch });
   assert.ok(chg.value instanceof BinaryHandle);
   const data = await (chg.value as BinaryHandle).bytes();
   assert.equal(createHash('sha256').update(data).digest('hex'), vector.binary.inner_full_sha256);
@@ -186,7 +186,7 @@ test('change field_updated binary is a lazy handle', async () => {
 
 test('change consent event has slug, no value', () => {
   const body = { changes: [{ id: 'chg-9', event: 'consent_accepted', person_user_id: 'p', slug: 'work_email', at: '2026-06-17T00:00:00Z' }] };
-  const [chg] = Change.listFromApi(body, { typeForSlug: () => 'email', decryptValue: () => '' });
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => 'email', fieldTypes: testFieldTypes(), decryptValue: () => '' });
   assert.equal(chg.event, 'consent_accepted');
   assert.equal(chg.slug, 'work_email');
   assert.equal(chg.value, null); // consent events carry no value
@@ -220,7 +220,7 @@ test('change includes share_code', () => {
       { id: 'chg-2', event: 'connection_created', person_user_id: 'person-2', at: '2026-06-17T12:00:00Z' }, // no share_code -> null
     ],
   };
-  const changes = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  const changes = Change.listFromApi(body, { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue });
   assert.equal(changes[0].shareCode, 'ABC123');
   assert.equal(changes[1].shareCode, null);
 });
@@ -244,7 +244,7 @@ test('change includes customer_type (B2B #163)', () => {
       { id: 'chg-2', event: 'connection_created', person_user_id: 'person-2', at: '2026-07-07T12:00:00Z' },
     ],
   };
-  const changes = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  const changes = Change.listFromApi(body, { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue });
   assert.equal(changes[0].customerType, 'company');
   assert.equal(changes[1].customerType, null);
 });
@@ -252,13 +252,13 @@ test('change includes customer_type (B2B #163)', () => {
 test('connection includes customer_type + share_code (B2B #163)', () => {
   const conn = Connection.fromApi(
     { connection_id: 'c-1', user_id: 'co-9', customer_type: 'company', share_code: 'PARTNER', values: {} },
-    { typeForSlug: () => null, decryptValue },
+    { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue },
   );
   assert.equal(conn.customerType, 'company');
   assert.equal(conn.shareCode, 'PARTNER');
   const bare = Connection.fromApi(
     { connection_id: 'c-2', user_id: 'p-1', values: {} },
-    { typeForSlug: () => null, decryptValue },
+    { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue },
   );
   assert.equal(bare.customerType, null);
   assert.equal(bare.shareCode, null);
@@ -286,7 +286,7 @@ test('change document_status_changed parses documentId + status', () => {
       },
     ],
   };
-  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue });
   assert.equal(chg.event, 'document_status_changed');
   assert.equal(chg.documentId, 'doc-9');
   assert.equal(chg.status, 'ended');
@@ -311,7 +311,7 @@ test('change document_status_changed carries action for a contract', () => {
       },
     ],
   };
-  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue });
   assert.equal(chg.event, 'document_status_changed');
   assert.equal(chg.action, 'signed');
   assert.equal(chg.documentId, 'doc-7');
@@ -335,7 +335,7 @@ test('change document_status_changed carries note on a cancellation', () => {
       },
     ],
   };
-  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, decryptValue });
+  const [chg] = Change.listFromApi(body, { typeForSlug: () => null, fieldTypes: testFieldTypes(), decryptValue });
   assert.equal(chg.event, 'document_status_changed');
   assert.equal(chg.action, 'cancelled');
   assert.equal(chg.note, 'Too expensive');

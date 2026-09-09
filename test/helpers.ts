@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { FieldTypeRegistry } from '../src/index.js';
 import {
   createPublicKey,
   publicEncrypt,
@@ -59,4 +60,24 @@ export function encryptForKey(vector: Vector, plaintext: string): { _enc: number
     iv: iv.toString('base64'),
     d: Buffer.concat([ct, tag]).toString('base64'),
   };
+}
+
+/** The field-type vector's own registry — the rows every model test types its values against. */
+let cachedFieldTypes: FieldTypeRegistry | null = null;
+let cachedFieldTypeRows: unknown[] | null = null;
+
+export function testFieldTypes(): FieldTypeRegistry {
+  if (cachedFieldTypes === null) {
+    cachedFieldTypes = new FieldTypeRegistry(testFieldTypeRows() as never[]);
+  }
+  return cachedFieldTypes;
+}
+
+/** The same rows as a served GET /api/contact-field-types body. */
+export function testFieldTypeRows(): unknown[] {
+  if (cachedFieldTypeRows === null) {
+    const path = join(here, '..', 'testdata', 'contract-field-validation-vector.json');
+    cachedFieldTypeRows = (JSON.parse(readFileSync(path, 'utf8')) as { registry: unknown[] }).registry;
+  }
+  return cachedFieldTypeRows;
 }

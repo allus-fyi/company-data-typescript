@@ -12,16 +12,18 @@
  *     Change       { id, event, personId, shareCode?, slug?, value?, live?, at }   // id = stable dedup key
  *     LogEntry     { type, message, metadata, at }
  *
- * Typed values:
- *   - `email`/`phone`/`url`/`text` → string
- *   - `address`/`bank`/`creditcard`  → a parsed object (the decrypted plaintext is a
- *     JSON object string → parsed)
- *   - `date`/`date_of_birth`         → a JS `Date` (UTC midnight; falls back to the
- *     raw string if it can't be parsed)
- *   - `photo`/`document`/`legal_document` and the ID-document subtypes
- *     `passport`/`photo_id`/`drivers_license` → a lazy {@link BinaryHandle}
- *     (`.bytes()` fetches the slot file endpoint, decrypts, parses the envelope,
- *     base64-decodes the `full`/`file` data URI)
+ * A value's shape follows the RESOLVED DEFINITION of its field type
+ * ({@link FieldTypeRegistry}), never a list of type names:
+ *   - storage lane `photo`/`document` → a lazy {@link BinaryHandle} (`.bytes()` fetches
+ *     the slot file endpoint, decrypts, parses the envelope, base64-decodes the
+ *     `full`/`file` data URI)
+ *   - primitive `composite` → a parsed object (the decrypted plaintext is a JSON object
+ *     string → parsed)
+ *   - primitive `date` → a JS `Date` (UTC midnight; falls back to the raw string if it
+ *     can't be parsed)
+ *   - primitive `multilist` → a parsed array
+ *   - everything else → the plaintext string, whose grammar the registry's `validate()`
+ *     states
  *
  * Every model carries `.raw` — the underlying (hardened) API object — for debugging
  * or an edge case the SDK didn't model. It never contains the person's source field.
@@ -32,23 +34,7 @@
  */
 
 import { BinaryHandle, DecryptError, type BinaryFetch, type DecryptWrapper, type EncWrapper, hashMatches } from './crypto.js';
-
-/** Field types whose decrypted plaintext is a JSON object → a parsed object. */
-export const STRUCTURED_TYPES = ['address', 'bank', 'creditcard'] as const;
-/**
- * Field types whose value is a lazy binary handle (served as a value_url) — the ID-document
- * subtypes are children of `legal_document` and share its envelope.
- */
-export const BINARY_TYPES = [
-  'photo',
-  'document',
-  'legal_document',
-  'passport',
-  'photo_id',
-  'drivers_license',
-] as const;
-/** Field types whose decrypted plaintext is an ISO date. */
-export const DATE_TYPES = ['date', 'date_of_birth'] as const;
+import { FieldTypeRegistry } from './fieldTypes.js';
 
 /** A type resolver: slug -> the request field's type (e.g. "email", "photo"). */
 export type TypeForSlug = (slug: string) => string | null | undefined;
@@ -224,7 +210,12 @@ export class Value {
   /** Build a typed Value from one hardened `{value|value_url, live, updatedAt}` entry. */
   static fromApi(
     obj: Json,
-    opts: { fieldType: string | null | undefined; decryptValue: DecryptWrapper; binaryFetch?: BinaryFetch | null },
+    opts: {
+      fieldType: string | null | undefined;
+      fieldTypes: FieldTypeRegistry;
+      decryptValue: DecryptWrapper;
+      binaryFetch?: BinaryFetch | null;
+    },
   ): Value {
     const live = Boolean(coerceBool(obj['live']));
     const updatedAt = parseIsoDate(obj['updatedAt'] ?? obj['updated_at']);
@@ -246,12 +237,18 @@ export class Value {
 
 function typedValue(
   obj: Json,
-  opts: { fieldType: string | null | undefined; decryptValue: DecryptWrapper; binaryFetch?: BinaryFetch | null },
+  opts: {
+    fieldType: string | null | undefined;
+    fieldTypes: FieldTypeRegistry;
+    decryptValue: DecryptWrapper;
+    binaryFetch?: BinaryFetch | null;
+  },
 ): unknown {
   const ftype = (opts.fieldType ?? '').toLowerCase();
+  const definition = opts.fieldTypes.resolve(ftype);
 
   // Binary → a lazy handle over the slot value_url (no eager fetch/decrypt).
-  if ((BINARY_TYPES as readonly string[]).includes(ftype) || 'value_url' in obj) {
+  if (opts.fieldTypes.isBinary(ftype) || 'value_url' in obj) {
     const valueUrl = obj['value_url'];
     if (valueUrl === undefined || valueUrl === null) {
       // Binary type but no url (e.g. unanswered) → an empty handle.
@@ -271,7 +268,7 @@ function typedValue(
   }
   const plaintext = opts.decryptValue(ciphertext as EncWrapper | string);
 
-  if ((STRUCTURED_TYPES as readonly string[]).includes(ftype)) {
+  if (definition.input === 'composite' || definition.input === 'multilist') {
     try {
       return JSON.parse(plaintext);
     } catch {
@@ -279,12 +276,12 @@ function typedValue(
     }
   }
 
-  if ((DATE_TYPES as readonly string[]).includes(ftype)) {
+  if (definition.input === 'date') {
     const d = parseDateOnly(plaintext);
     return d !== null ? d : plaintext;
   }
 
-  // text/email/phone/url and anything unknown → the plaintext string.
+  // Every other primitive, and a type the registry does not carry, is the plaintext string.
   return plaintext;
 }
 
@@ -320,6 +317,7 @@ export class Connection {
     obj: Json,
     opts: {
       typeForSlug: TypeForSlug;
+      fieldTypes: FieldTypeRegistry;
       decryptValue: DecryptWrapper;
       binaryFetch?: BinaryFetch | null;
       identity?: Json;
@@ -343,6 +341,7 @@ export class Connection {
         if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
         values[slug] = Value.fromApi(entry as Json, {
           fieldType: opts.typeForSlug(slug),
+          fieldTypes: opts.fieldTypes,
           decryptValue: opts.decryptValue,
           binaryFetch: opts.binaryFetch,
         });
@@ -438,7 +437,12 @@ export class Change {
   /** Build a Change from one hardened changes-feed / webhook event object. */
   static fromApi(
     obj: Json,
-    opts: { typeForSlug: TypeForSlug; decryptValue: DecryptWrapper; binaryFetch?: BinaryFetch | null },
+    opts: {
+      typeForSlug: TypeForSlug;
+      fieldTypes: FieldTypeRegistry;
+      decryptValue: DecryptWrapper;
+      binaryFetch?: BinaryFetch | null;
+    },
   ): Change {
     const slug = obj['slug'] != null ? String(obj['slug']) : null;
     const event = obj['event'] != null ? String(obj['event']) : '';
@@ -451,6 +455,7 @@ export class Change {
       if ('value' in obj || 'value_url' in obj) {
         value = typedValue(obj, {
           fieldType: opts.typeForSlug(slug),
+          fieldTypes: opts.fieldTypes,
           decryptValue: opts.decryptValue,
           binaryFetch: opts.binaryFetch,
         });
@@ -525,7 +530,12 @@ export class Change {
   /** Parse the `/changes` response → a list of typed Change events. */
   static listFromApi(
     body: unknown,
-    opts: { typeForSlug: TypeForSlug; decryptValue: DecryptWrapper; binaryFetch?: BinaryFetch | null },
+    opts: {
+      typeForSlug: TypeForSlug;
+      fieldTypes: FieldTypeRegistry;
+      decryptValue: DecryptWrapper;
+      binaryFetch?: BinaryFetch | null;
+    },
   ): Change[] {
     const items = listOf(body, 'changes');
     return items.map((o) => Change.fromApi(o, opts));

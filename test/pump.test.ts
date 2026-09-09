@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { Change, Config, DecryptError, FileBuffer, Pump, decrypt } from '../src/index.js';
 import type { BufferedEvent, EncWrapper } from '../src/index.js';
-import { loadVector, loadVectorPrivateKey } from './helpers.js';
+import { loadVector, loadVectorPrivateKey, testFieldTypes, testFieldTypeRows } from './helpers.js';
 
 const vector = loadVector();
 const privateKey = loadVectorPrivateKey(vector);
@@ -37,7 +37,7 @@ function makeConfig(cacheDir: string): Config {
 }
 
 const decryptChange = (event: BufferedEvent): Change =>
-  Change.fromApi(event, { typeForSlug: () => 'text', decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
+  Change.fromApi(event, { typeForSlug: () => 'text', fieldTypes: testFieldTypes(), decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
 
 function makeEvents(count: number, start = 1): BufferedEvent[] {
   const events: BufferedEvent[] = [];
@@ -482,7 +482,7 @@ test('poison decrypt dead-letters without wedging', async () => {
         decryptCalls['chg-0002'] += 1;
         throw new DecryptError('corrupt ciphertext for chg-0002');
       }
-      return Change.fromApi(event, { typeForSlug: () => 'text', decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
+      return Change.fromApi(event, { typeForSlug: () => 'text', fieldTypes: testFieldTypes(), decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
     };
 
     const events = makeEvents(1, 1);
@@ -525,7 +525,7 @@ test('poison decrypt with halt re-raises', async () => {
     const config = makeConfig(cacheDir);
     const poisonDecrypt = (event: BufferedEvent): Change => {
       if (event.id === 'chg-0001') throw new DecryptError('undecryptable');
-      return Change.fromApi(event, { typeForSlug: () => 'text', decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
+      return Change.fromApi(event, { typeForSlug: () => 'text', fieldTypes: testFieldTypes(), decryptValue: (w) => decrypt(w as EncWrapper, privateKey) });
     };
     const source = new FakeSource([makePoisonEvent('chg-0001')]);
     const pump = new Pump(config, { fetchChanges: source.fetch, decrypt: poisonDecrypt, sleep: noSleep });

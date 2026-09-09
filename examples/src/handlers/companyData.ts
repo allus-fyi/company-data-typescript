@@ -440,7 +440,7 @@ export class CompanyDataHandler {
     }
     try {
       this.recordCall(run, CALL_PARSE_WEBHOOK);
-      const change = client.parseWebhook(rawBody, headers);
+      const change = await client.parseWebhook(rawBody, headers);
       (run.events as unknown[]).push(this.projectChange(change, 'webhook'));
     } catch (e) {
       if (!(e instanceof WebhookError)) throw e;
