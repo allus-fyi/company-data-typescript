@@ -81,6 +81,24 @@ function coerceBool(value: unknown): boolean | null {
   return Boolean(value);
 }
 
+/**
+ * Coerce the one schema-defined boolean inside a signature map entry. The
+ * entries stay untyped (matching every existing signature field), but
+ * signerNameVerified is a boolean in the schema — XML carries it as the
+ * string "false"/"true", and a caller testing that raw string for truthiness
+ * reads a false verification as verified. Coerce it the same way every other
+ * boolean field on this transport is coerced.
+ */
+function normalizeSignatures(signatures: unknown): Json[] {
+  if (!Array.isArray(signatures)) return [];
+  return signatures.map((entry) => {
+    if (entry !== null && typeof entry === 'object' && !Array.isArray(entry) && 'signer_name_verified' in (entry as Record<string, unknown>)) {
+      return { ...(entry as Record<string, unknown>), signer_name_verified: coerceBool((entry as Record<string, unknown>)['signer_name_verified']) } as Json;
+    }
+    return entry as Json;
+  });
+}
+
 function parseDateOnly(value: string): Date | null {
   const head = value.trim().slice(0, 10);
   // Strict YYYY-MM-DD; build a UTC date so there's no timezone drift.
@@ -399,6 +417,15 @@ export class Change {
     readonly signedAt: string | null,
     /** Set on a cancelled `document_status_changed` — ISO date the cancellation takes effect (else null). */
     readonly cancelEffectiveDate: string | null,
+    /** Set on `document_status_changed` — when the platform seal was applied (else null until sealed). */
+    readonly sealedAt: string | null,
+    /** Set on `document_status_changed` — SHA-256 of the document's unencrypted PDF bytes (else null on a JSON contract). */
+    readonly plainSha256: string | null,
+    /** Set on `document_status_changed` — the signature's own signer evidence (else null). */
+    readonly signerFirstName: string | null,
+    readonly signerLastName: string | null,
+    /** True iff the submitted name matched the signer's verified ID name; null when unset. */
+    readonly signerNameVerified: boolean | null,
     /** Set on `connection_request_accepted` / `connection_request_rejected` — the request_id (else null). */
     readonly requestId: string | null,
     /** The customer's TYPE: "person" | "company" (B2B); null on older API. */
@@ -487,6 +514,11 @@ export class Change {
     const contentSha256Raw = event === 'document_status_changed' ? obj['content_sha256'] : null;
     const signedAtRaw = event === 'document_status_changed' ? obj['signed_at'] : null;
     const cancelEffectiveDateRaw = event === 'document_status_changed' ? obj['cancel_effective_date'] : null;
+    const sealedAtRaw = event === 'document_status_changed' ? obj['sealed_at'] : null;
+    const plainSha256Raw = event === 'document_status_changed' ? obj['plain_sha256'] : null;
+    const signerFirstNameRaw = event === 'document_status_changed' ? obj['signer_first_name'] : null;
+    const signerLastNameRaw = event === 'document_status_changed' ? obj['signer_last_name'] : null;
+    const signerNameVerifiedRaw = event === 'document_status_changed' ? obj['signer_name_verified'] : null;
     const requestIdRaw =
       event === 'connection_request_accepted' || event === 'connection_request_rejected'
         ? obj['request_id']
@@ -507,6 +539,11 @@ export class Change {
       contentSha256Raw != null ? String(contentSha256Raw) : null,
       signedAtRaw != null ? String(signedAtRaw) : null,
       cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
+      sealedAtRaw != null ? String(sealedAtRaw) : null,
+      plainSha256Raw != null ? String(plainSha256Raw) : null,
+      signerFirstNameRaw != null ? String(signerFirstNameRaw) : null,
+      signerLastNameRaw != null ? String(signerLastNameRaw) : null,
+      signerNameVerifiedRaw != null ? coerceBool(signerNameVerifiedRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       obj['customer_type'] != null ? String(obj['customer_type']) : null,
       event === 'key_rotated' && obj['public_key_sha256'] != null
@@ -574,7 +611,15 @@ export class Document {
     readonly requiresSignature: boolean,
     /** Contract: the person must accept. */
     readonly requiresAcceptance: boolean,
-    /** Contract sign/accept audit trail (company-side reads only). */
+    /** SHA-256 of the unencrypted PDF bytes, lowercase hex. Null on a JSON contract. */
+    readonly plainSha256: string | null,
+    /** When the platform seal was applied. Null until sealed. */
+    readonly sealedAt: Date | null,
+    /**
+     * Contract sign/accept audit trail (company-side reads only), one entry per signature:
+     * action, method, content_sha256, plain_sha256, signer_first_name, signer_last_name,
+     * signer_name_verified, ip, user_agent, created_at.
+     */
     readonly signatures: Json[],
     /**
      * Present only on a contract-flow run-participant document: the run's ordered signature
@@ -628,7 +673,9 @@ export class Document {
       parseIsoDate(obj['updated_at']),
       Boolean(coerceBool(obj['requires_signature'])),
       Boolean(coerceBool(obj['requires_acceptance'])),
-      Array.isArray(obj['signatures']) ? (obj['signatures'] as Json[]) : [],
+      obj['plain_sha256'] != null ? String(obj['plain_sha256']) : null,
+      parseIsoDate(obj['sealed_at']),
+      normalizeSignatures(obj['signatures']),
       Array.isArray(obj['run_signatures']) ? (obj['run_signatures'] as Json[]) : null,
       opts.decryptValue ?? null,
       obj,

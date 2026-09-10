@@ -533,6 +533,7 @@ A change-feed / webhook event.
 | `personId` | The person the change is about (may be `null`). |
 | `slug`, `value`, `live` | Present only on `field_updated`; `value` is typed exactly like `Value.value` (incl. a lazy `BinaryHandle` for binaries). Connection/consent/document events carry no slot/value. |
 | `documentId`, `status` | Present only on `document_status_changed` — the affected document's id and its new lifecycle status. `null` on every other event. |
+| `sealedAt`, `plainSha256`, `signerFirstName`, `signerLastName`, `signerNameVerified` | Present on a `document_status_changed` transition to `active` — the same seal state the document read carries, so a webhook or pump consumer never needs a follow-up `document(id)` call to learn a run sealed. `null` otherwise. |
 | `connectionId`, `messageId`, `personPublicKey`, `messageBody` | Present only on `message_received` — a person messaged your service. `messageBody` is the **decrypted** text. See [Messaging](#messaging). |
 | `verified`, `verifiedAt`, `verifiedExpiresAt` | Present on `field_updated`, with the same meaning as on `Value`. |
 | `verifiedMethod`, `verifiedProvider`, `verificationId` | The proof metadata, same meaning and same all-or-none rule as on `Value`. |
@@ -796,6 +797,8 @@ const receipt = await client.createDocument({
   personUserId: 'person-uuid',
   fileBytes: pdfBuffer,              // Buffer | Uint8Array
   fileMime: 'application/pdf',
+  requiresSignature: true,
+  // plainSha256: computePlainSha256(pdfBuffer),  // optional — computed for you otherwise
 });
 ```
 
@@ -803,7 +806,11 @@ const receipt = await client.createDocument({
 JSON-serialisable object); `'file'` requires `fileBytes` (and an optional
 `fileMime`). For per-person json docs, read the plaintext back with `.json()` —
 it decrypts transparently with the SDK's own key; broadcast json is already
-plaintext.
+plaintext. For `payloadKind='file'`, `plainSha256` (SHA-256 of the raw PDF
+bytes, lowercase hex) is computed from `fileBytes` via `computePlainSha256`
+when not given explicitly, and sent with the create call — required by the
+server for a signable file document (`requiresSignature`/`requiresAcceptance`),
+optional for any other, ignored for `payloadKind='json'`.
 
 ### List, fetch, update, delete
 
@@ -827,7 +834,24 @@ await client.deleteDocument(notice.id);
 ```
 
 A `Document` is `{ id, kind, name, description, status, payloadKind, isPrivate,
-value, metadata, createdAt, updatedAt, raw }` with a `.json()` helper for json docs.
+value, metadata, createdAt, updatedAt, plainSha256, sealedAt, signatures, raw }`
+with a `.json()` helper for json docs.
+
+**The document seal.** Completing every required signature/acceptance on a
+signable document is not the same as sealing it. When the last one is recorded
+the platform *attempts*, on that same request, to append a Signatures page and
+sign the whole PDF with a platform certificate, replacing every party's copy
+with the sealed one. The attempt can fail (no PDF bytes on the completing act,
+a byte mismatch, the sealing service unavailable, or a custodian-completed ward
+act) without affecting the signatures or the document's completed status — it
+is simply left unsealed, and any party can seal it afterwards from their own
+device or the owning company's portal (no SDK call triggers a seal).
+`doc.sealedAt` is `null` until a seal actually succeeds; `doc.plainSha256` is
+the SHA-256 of the document's unencrypted PDF bytes (`null` on a json document,
+and on a file document with no stored plaintext hash). Each `doc.signatures` entry
+additionally carries `plain_sha256`, `signer_first_name`, `signer_last_name` and
+`signer_name_verified` beside its existing `action`/`method`/`content_sha256`/
+`ip`/`user_agent`/`created_at` keys.
 
 * `listDocuments(opts)` filters optionally by `personUserId` and/or `status` and pages with `limit`/`offset`.
 * `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).

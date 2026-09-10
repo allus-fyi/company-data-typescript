@@ -44,6 +44,7 @@ export {
   loadPublicKey,
   decrypt,
   encryptForPublicKey,
+  computePlainSha256,
   BinaryHandle,
   GCM_IV_LEN,
   GCM_TAG_LEN,

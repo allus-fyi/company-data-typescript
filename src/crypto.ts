@@ -494,6 +494,15 @@ export class BinaryHandle {
 
 
 /**
+ * SHA-256 of raw PDF bytes, lowercase hex — the plainSha256 a signable file document's
+ * create call and every sign/accept act must agree on. Exposed so a caller can precompute
+ * or verify it; createDocument calls this itself when a plainSha256 override is not given.
+ */
+export function computePlainSha256(bytes: Buffer | Uint8Array): string {
+  return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
+}
+
+/**
  * Verified fields: true iff sha256(salt ‖ plaintext) === expectedHash (hex).
  * Consumers recompute this from the plaintext they just decrypted and trust the
  * verified flag ONLY on a match — a substituted/drifted value renders unverified.

@@ -50,6 +50,7 @@ import type { KeyObject } from 'node:crypto';
 import { Config } from './config.js';
 import {
   BinaryHandle,
+  computePlainSha256,
   decrypt as cryptoDecrypt,
   encryptForPublicKey,
   loadPrivateKey,
@@ -783,6 +784,12 @@ export class Client {
     requiresSignature?: boolean;
     /** Contract: the person must accept. Forces a per-person target. */
     requiresAcceptance?: boolean;
+    /**
+     * For payloadKind='file', SHA-256 of fileBytes (lowercase hex) — required by the server for
+     * a signable file document, optional for any other, ignored for payloadKind='json'. Computed
+     * via computePlainSha256 when not given.
+     */
+    plainSha256?: string;
     metadata?: Json;
     status?: string;
   }): Promise<Document> {
@@ -855,6 +862,7 @@ export class Client {
     if (opts.fileBytes === undefined) {
       throw new ConfigError("fileBytes is required for payloadKind='file'");
     }
+    body['plain_sha256'] = opts.plainSha256 || computePlainSha256(opts.fileBytes);
     const created = await this.http.post(DOCUMENTS, { json: body });
     const doc = Document.fromApi(docObj(created), { decryptValue: this.decryptValue });
     const fileBytes = Buffer.from(opts.fileBytes);
