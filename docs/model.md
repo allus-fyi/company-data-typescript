@@ -94,35 +94,68 @@ A lazy handle for a binary value. No network or decryption happens at constructi
 ```ts
 class BinaryHandle {
   get valueUrl(): string | null;        // the opaque slot-keyed file URL (read-only)
-  get contentType(): string | null;     // the Content-Type the bytes arrived with (after a fetch)
-  get contentSha256(): string | null;   // the X-Allus-Content-Sha256 digest of those bytes
+  get contentType(): string | null;     // the Content-Type the answer arrived with (after a fetch)
+  get contentSha256(): string | null;   // the X-Allus-Content-Sha256 digest of the SERVED ARTIFACT
   bytes(): Promise<Buffer>;             // fetch (if needed) → the primary file bytes
   save(path: string): Promise<number>;  // write bytes() to path; resolves to bytes written
+  pages(): Promise<BinaryPage[]>;       // the envelope's pages, in order ([] for a single-file one)
+  metadata(): Promise<Record<string, string | null>>;       // the type's declared entries
   static parseEnvelopeBytes(envelopeJson: string): Buffer;  // envelope string → file bytes
+}
+
+interface BinaryPage {
+  label: string | null;   // front | back | additional
+  name: string | null;    // the original filename
+  mime: string | null;    // the server-derived media type
+  bytes: Buffer;          // the decoded page bytes
 }
 ```
 
-The file endpoint has **two 200 shapes**, decided by whether the person's source field
-is private — the company cannot predict or control which arrives. On first
-`.bytes()`/`.save()` the handle GETs the slot-keyed file endpoint and classifies the
-response on its `Content-Type` (never by sniffing the body):
+The file endpoint has **three 200 shapes**, decided by whether the person's source field
+is private AND by the TYPE of the field they answered with — the company cannot predict
+or control which arrives. On the first `.bytes()`/`.pages()`/`.metadata()`/`.save()` the
+handle GETs the slot-keyed file endpoint and classifies the response — the raw-bytes
+shape on its `Content-Type` (never by sniffing the body), the two JSON ones on the body's
+`encrypted` member:
 
-* **`application/json`, or no `Content-Type` at all** → the encrypted shape,
-  `{"encrypted": true, "value": <wrapper>}`. Decrypt the inner `{"_enc":1,…}` wrapper with
-  the service key → a JSON file-envelope string (`{"full": "data:…", "thumb": …}` for photos,
-  `{"file": "data:…", …}` for documents), then base64-decode the primary data URI (`full`
-  for photos, `file` for documents) → a `Buffer`.
-* **any other `Content-Type`** (`image/jpeg`, `application/pdf`, …) → the plaintext shape:
-  the body already IS the file. Nothing is decrypted, and a handle built without decrypt
-  wiring still works.
+* **`application/json`, or no `Content-Type` at all, with `encrypted: true`** → the
+  encrypted shape, `{"encrypted": true, "value": <wrapper>}`. Decrypt the inner
+  `{"_enc":1,…}` wrapper with the service key → the JSON ENVELOPE string.
+* **`application/json` with `encrypted: false` and a string `value`** → the envelope
+  shape: that same envelope string in the clear, for a non-private source whose type
+  stores more than one file or declares metadata entries (the ID-document subtypes and
+  `legal_document`). Nothing is decrypted.
+* **any other `Content-Type`** (`image/jpeg`, `application/pdf`, …) → the plaintext-bytes
+  shape: the body already IS the file. Nothing is decrypted, and a handle built without
+  decrypt wiring still works.
 
 A missing `Content-Type` deliberately falls through to the JSON path: mistaking a wrapper
 for file bytes writes ciphertext to disk as if it were the document and nothing complains,
-while mistaking bytes for a wrapper fails loudly at the parse.
+while mistaking bytes for a wrapper fails loudly at the parse. A JSON body that does not
+carry `encrypted: false` with a string `value` takes the wrapper arm, which is what keeps
+the bare-wrapper routes (a company's own contract copy, its run slot file) working
+unchanged.
+The envelope is a photo's `{"full": "data:…", "thumb": …}`, a single-file document's
+`{"file": "data:…", …}`, or a multi-page document's
+`{"pages": [{"label": …, "file": "data:…", …}], …}`, with every entry the type declares
+beside it.
 
-Either way the result is cached on the handle (repeated calls don't re-fetch), and
-`contentSha256` exposes the `X-Allus-Content-Sha256` digest of exactly the bytes returned.
-There is no variant selection: one slot has one byte sequence and one digest.
+`.pages()` resolves to the pages of a multi-page envelope in order, and `[]` for a
+single-file one. `.metadata()` resolves to every string-keyed envelope member other than
+`pages`, `file`, `full`, `thumb`, `original_name`, `mime_type` and `size`, so a passport's
+`document_number`, `expiry_date`, `issuing_country` and `name` are all there; **it carries
+no ordering guarantee** — read the envelope string yourself if you need the declared
+order. **On a multi-page envelope `.bytes()`/`.save()` reject with
+`DecryptError('multi-page envelope: use pages')`** rather than handing back the front page
+as though it were the whole document.
+
+All of the accessors share ONE lazy fetch: whichever is called first performs it, and
+the result is cached (repeated calls don't re-fetch). The digest header
+`X-Allus-Content-Sha256` is the sha256 of the **served artifact** — the raw bytes on the
+bytes shape, the served `value` string on either JSON shape — not "the sha256 of what
+`.bytes()` returns", which is false on a multi-page envelope. There is no variant
+selection.
+
 
 `.save()` is crash-safe (temp file → fsync → atomic rename — never a truncated
 output). An unanswered binary slot yields an empty handle; calling `.bytes()` on it

@@ -248,31 +248,54 @@ export function encryptForPublicKey(plaintext: string, publicKey: KeyObject): En
 /**
  * One response from a company-facing binary file endpoint, in the shape a {@link BinaryHandle} needs.
  *
- * The route has TWO 200 shapes and the company cannot predict which it will get, because the
- * answer depends on whether the person's source field is private, which is theirs to change:
+ * The route has THREE 200 shapes and the company cannot predict which it will get, because the
+ * answer depends on the person's own privacy setting and on the TYPE of the field they answered
+ * with, neither of which the company chooses:
  *
  * - **encrypted** — `application/json`, `{"encrypted":true,"value":<wrapper>}`. The wrapper decrypts
- *   to the binary ENVELOPE string, from which the file bytes are extracted.
- * - **plaintext** — the file's own `Content-Type` (e.g. `image/jpeg`, `application/pdf`) and the body
- *   IS the file bytes. Nothing to decrypt.
+ *   to the binary ENVELOPE string.
+ * - **envelope** — `application/json`, `{"encrypted":false,"value":"<envelope>"}`. The plaintext
+ *   envelope string itself, for a non-private source whose type stores more than one file or
+ *   declares metadata entries. Nothing to decrypt.
+ * - **plaintext bytes** — the file's own `Content-Type` (e.g. `image/jpeg`, `application/pdf`) and
+ *   the body IS the file bytes.
  *
- * The distinction is made on the response's `Content-Type`, never guessed from the body: a plaintext
- * answer's first byte is whatever the file starts with, and a PDF or a JPEG that happened to begin
- * with a brace would be indistinguishable from a wrapper by sniffing.
+ * The bytes shape is told apart from the two JSON ones on the response's `Content-Type`, never
+ * guessed from the body: a plaintext answer's first byte is whatever the file starts with, and a PDF
+ * or a JPEG that happened to begin with a brace would be indistinguishable from a wrapper by
+ * sniffing. Inside a JSON body it is `encrypted` that decides; a JSON body that does not carry
+ * `encrypted: false` with a string `value` is the wrapper arm, which is what the bare-wrapper
+ * routes (a company's own contract copy, its run slot file) answer with.
  *
- * `contentSha256` is the platform's `X-Allus-Content-Sha256` — the sha256 of exactly these bytes,
- * present on both shapes — so a consumer can record what it received and later prove its archived
- * copy has not drifted.
+ * `contentSha256` is the platform's `X-Allus-Content-Sha256` — the sha256 of the SERVED ARTIFACT:
+ * the raw bytes on the bytes shape, the served `value` string on either JSON shape — so a consumer
+ * can record what it received and later prove its archived copy has not drifted.
  */
 export interface BinaryFetchResult {
-  /** `true` for the JSON-wrapper shape, `false` when the body already IS the file. */
+  /** `true` for the JSON-wrapper shape, `false` for the envelope shape and for raw bytes. */
   encrypted: boolean;
   /** The `{"_enc":1,…}` wrapper (encrypted shape). */
   wrapper?: EncWrapper | string | null;
-  /** The file bytes themselves (plaintext shape). */
+  /** The file bytes themselves (plaintext-bytes shape). */
   bytes?: Buffer | null;
+  /** The plaintext envelope string (envelope shape). */
+  envelope?: string | null;
   contentType?: string | null;
   contentSha256?: string | null;
+}
+
+/**
+ * One page of a multi-page binary answer (an ID document's front, back, …).
+ *
+ * `label` is the page's own label (`front` | `back` | `additional`), `name` the original filename
+ * the person uploaded it under, `mime` the server-derived media type, and `bytes` the decoded page
+ * bytes.
+ */
+export interface BinaryPage {
+  label: string | null;
+  name: string | null;
+  mime: string | null;
+  bytes: Buffer;
 }
 
 /** Fetch a slot file endpoint → the classified response (which shape arrived, plus its digest). */
@@ -283,26 +306,34 @@ export type DecryptWrapper = (wrapper: EncWrapper | string) => string;
 const DATA_URI_KEYS = ['full', 'file'] as const;
 
 /**
+ * Envelope members that describe the envelope itself rather than the type's own declared entries —
+ * everything NOT in this set is metadata.
+ */
+const ENVELOPE_MEMBERS = new Set(['pages', 'file', 'full', 'thumb', 'original_name', 'mime_type', 'size']);
+
+/**
  * Lazy handle for a binary (photo/document) value.
  *
  * A binary answer is stored server-side as a file, exposed in the hardened API as
  * a slot-keyed `value_url` (never the source field). `.bytes()` and `.save()` GET
- * that URL and return the FILE BYTES either way — the caller never has to know
- * which of the two response shapes arrived.
+ * that URL and return the FILE BYTES; `.pages()` and `.metadata()` expose the rest of the
+ * envelope. The caller never has to know which of the three response shapes arrived.
  *
- * THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT THE
- * COMPANY'S. Whether the person's source field is private decides it, they can change it at
+ * THERE ARE THREE SHAPES, AND WHICH ONE ARRIVES IS NOT THE COMPANY'S CHOICE. The person's own
+ * privacy setting and the TYPE of the field they answered with decide it, either can change at
  * any time, and nothing in the API announces it in advance:
  *
  *   - **private source** → `application/json` `{"encrypted":true,"value":<wrapper>}`. The wrapper
- *     decrypts to a JSON envelope STRING (photo: `{"full":"data:...","thumb":...}`; document:
- *     `{"file":"data:...",...}`) — NOT raw bytes — whose primary data-URI payload (`full` for
- *     photos, `file` for documents) base64-decodes to the file.
- *   - **plaintext source** → the file's own `Content-Type` and the body IS the file. There is
- *     nothing to decrypt, and a handle built this way needs no service key at all.
+ *     decrypts to a JSON envelope STRING (photo: `{"full":"data:...","thumb":...}`; single-file
+ *     document: `{"file":"data:...",...}`; multi-page document:
+ *     `{"pages":[{"file":"data:...",...}],...}`) — NOT raw bytes.
+ *   - **non-private source whose type stores pages or declares entries** → `application/json`
+ *     `{"encrypted":false,"value":"<envelope>"}`. The same envelope string, in the clear. There is
+ *     nothing to decrypt.
+ *   - **every other non-private source** → the file's own `Content-Type` and the body IS the file.
+ *     A handle built this way needs no service key at all.
  *
- * Photos resolve to the `full` representation. There is no variant selection: one slot has one byte
- * sequence and therefore one digest.
+ * Photos resolve to the `full` representation. There is no variant selection.
  *
  * The fetch + decrypt are supplied by the client as plain callables (config-only
  * key handling — no key is ever passed to this handle):
@@ -314,6 +345,9 @@ const DATA_URI_KEYS = ['full', 'file'] as const;
  *
  * For the shared crypto test vector the decrypted envelope is already in hand, so
  * a handle can also be built directly from `envelopeJson` (no fetch).
+ *
+ * `bytes()`, `pages()` and `metadata()` share ONE lazy fetch: whichever is awaited first performs
+ * it, and every later call answers from the parsed envelope.
  */
 export class BinaryHandle {
   private envelopeJson: string | null;
@@ -343,10 +377,17 @@ export class BinaryHandle {
   }
 
   /**
-   * The platform's `X-Allus-Content-Sha256` for the bytes this handle fetched — the sha256 of
-   * exactly what {@link bytes} returns, so a consumer can record it and later show that its archived
-   * copy has not drifted. `null` until something has been fetched, and on a handle built from an
-   * envelope that was never fetched through this class.
+   * The platform's `X-Allus-Content-Sha256` — the digest of the SERVED ARTIFACT.
+   *
+   * Which artifact that is follows the response arm: the raw bytes when the answer arrived as
+   * bytes, and the served `value` string on either JSON arm — the ciphertext wrapper for a private
+   * source, the plaintext envelope for a non-private one. It is NOT "the sha256 of what
+   * {@link bytes} returns": on an envelope carrying pages {@link bytes} rejects, and on an envelope
+   * carrying one file it resolves to the decoded payload rather than the envelope string.
+   *
+   * A consumer can record it and later show that its archived copy has not drifted. `null` until
+   * something has been fetched, and on a handle built from an envelope that was never fetched
+   * through this class.
    *
    * It is the platform's word, not a signature: it proves agreement with the platform's record, not
    * anything to a third party who doubts that record.
@@ -381,7 +422,13 @@ export class BinaryHandle {
 
     if (!result.encrypted) {
       // A plaintext answer needs no service key. Requiring `decrypt` here would make a handle
-      // built without one fail on exactly the answers that do not need it.
+      // built without one fail on exactly the answers that do not need it. The envelope arm is
+      // plaintext too — the same envelope string the wrapper arm decrypts to — so both JSON arms
+      // converge here.
+      if (result.envelope != null) {
+        this.envelopeJson = result.envelope;
+        return;
+      }
       this.plainBytes = result.bytes ?? Buffer.alloc(0);
       return;
     }
@@ -402,13 +449,8 @@ export class BinaryHandle {
     return this.envelopeJson;
   }
 
-  /**
-   * Turn a decrypted binary envelope STRING into the primary file bytes.
-   *
-   * Photo envelope -> the `full` data-URI payload; document envelope -> the `file`
-   * data-URI payload. Throws {@link DecryptError} on a malformed envelope.
-   */
-  static parseEnvelopeBytes(envelopeJson: string): Buffer {
+  /** The ONE envelope parser both JSON arms go through. */
+  private static parseEnvelope(envelopeJson: string): Record<string, unknown> {
     let envelope: unknown;
     try {
       envelope = JSON.parse(envelopeJson);
@@ -418,20 +460,11 @@ export class BinaryHandle {
     if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) {
       throw new DecryptError('binary envelope must be a JSON object');
     }
-    const rec = envelope as Record<string, unknown>;
+    return envelope as Record<string, unknown>;
+  }
 
-    let dataUri: string | null = null;
-    for (const key of DATA_URI_KEYS) {
-      if (typeof rec[key] === 'string') {
-        dataUri = rec[key] as string;
-        break;
-      }
-    }
-    if (dataUri === null) {
-      throw new DecryptError("binary envelope has no 'full'/'file' data-URI payload");
-    }
-
-    // data:<mime>;base64,<payload>
+  /** `data:<mime>;base64,<payload>` -> the decoded payload. */
+  private static decodeDataUri(dataUri: string): Buffer {
     const marker = 'base64,';
     const idx = dataUri.indexOf(marker);
     if (idx === -1) {
@@ -445,7 +478,113 @@ export class BinaryHandle {
     return buf;
   }
 
-  /** Fetch (if needed), decrypt, and return the decoded primary file bytes. */
+  /**
+   * Turn a decrypted binary envelope STRING into the primary file bytes.
+   *
+   * Photo envelope -> the `full` data-URI payload; single-file document envelope -> the `file`
+   * data-URI payload. A MULTI-PAGE envelope has no single primary file, so it throws rather than
+   * handing back the first page as though it were the whole document. Throws {@link DecryptError}
+   * on a malformed envelope.
+   */
+  static parseEnvelopeBytes(envelopeJson: string): Buffer {
+    const rec = BinaryHandle.parseEnvelope(envelopeJson);
+
+    let dataUri: string | null = null;
+    for (const key of DATA_URI_KEYS) {
+      if (typeof rec[key] === 'string') {
+        dataUri = rec[key] as string;
+        break;
+      }
+    }
+    if (dataUri === null) {
+      if (Array.isArray(rec.pages) && rec.pages.length > 0) {
+        throw new DecryptError('multi-page envelope: use pages');
+      }
+      throw new DecryptError("binary envelope has no 'full'/'file' data-URI payload");
+    }
+
+    return BinaryHandle.decodeDataUri(dataUri);
+  }
+
+  /**
+   * The envelope's pages, in envelope order — an empty list for a single-file envelope.
+   *
+   * Lazy exactly as {@link bytes} is: the first call of `bytes`, `pages` or `metadata` performs the
+   * one fetch and optional decrypt, and every later call answers from the parsed envelope. A handle
+   * built from an envelope string needs no fetch. A plaintext-BYTES answer carries no envelope, so
+   * it has no pages. Rejects with {@link DecryptError} on a failed fetch or decrypt, or a malformed
+   * envelope.
+   */
+  async pages(): Promise<BinaryPage[]> {
+    const rec = await this.envelopeOrNull();
+    if (rec === null || !Array.isArray(rec.pages)) {
+      return [];
+    }
+    return rec.pages.map((page): BinaryPage => {
+      if (page === null || typeof page !== 'object' || Array.isArray(page)) {
+        throw new DecryptError('binary envelope page has no data-URI payload');
+      }
+      const entry = page as Record<string, unknown>;
+      if (typeof entry.file !== 'string') {
+        throw new DecryptError('binary envelope page has no data-URI payload');
+      }
+      return {
+        label: typeof entry.label === 'string' ? entry.label : null,
+        name: typeof entry.original_name === 'string' ? entry.original_name : null,
+        mime: typeof entry.mime_type === 'string' ? entry.mime_type : null,
+        bytes: BinaryHandle.decodeDataUri(entry.file),
+      };
+    });
+  }
+
+  /**
+   * Every declared entry the envelope carries, as a plain map.
+   *
+   * Keys are every string-keyed envelope member other than the envelope's own (`pages`, `file`,
+   * `full`, `thumb`, `original_name`, `mime_type`, `size`); values are the stored string, or `null`
+   * for an entry the person left unset. `name` — the holder name an ID provider extracted — is a
+   * member like any other and appears here.
+   *
+   * **The map carries no ordering guarantee.** A consumer that needs the type's declared order
+   * reads the envelope string itself.
+   *
+   * Empty for a photo, for a plain document that declares no entries, and for a plaintext-BYTES
+   * answer. Lazy exactly as {@link pages} is.
+   */
+  async metadata(): Promise<Record<string, string | null>> {
+    const rec = await this.envelopeOrNull();
+    if (rec === null) {
+      return {};
+    }
+    const out: Record<string, string | null> = {};
+    for (const [key, value] of Object.entries(rec)) {
+      if (ENVELOPE_MEMBERS.has(key)) {
+        continue;
+      }
+      out[key] = typeof value === 'string' ? value : null;
+    }
+    return out;
+  }
+
+  /**
+   * The parsed envelope, fetching+decrypting on first use. `null` when the answer is plaintext
+   * BYTES, which carries no envelope at all.
+   */
+  private async envelopeOrNull(): Promise<Record<string, unknown> | null> {
+    if (this.envelopeJson === null) {
+      await this.fetchOnce();
+      if (this.envelopeJson === null) {
+        return null;
+      }
+    }
+    return BinaryHandle.parseEnvelope(this.envelopeJson);
+  }
+
+  /**
+   * Fetch (if needed), decrypt, and return the decoded primary file bytes.
+   *
+   * A MULTI-PAGE envelope has no single primary file and rejects: use {@link pages}.
+   */
   async bytes(): Promise<Buffer> {
     if (this.plainBytes !== null) {
       return this.plainBytes;

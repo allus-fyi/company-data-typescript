@@ -35,10 +35,11 @@
  *     map types every value (so `address` parses to an object, `photo` becomes a
  *     lazy binary handle, etc.).
  *   - **Binary** — a value's `BinaryHandle.bytes()` GETs the slot file endpoint and returns the
- *     file bytes. That endpoint answers in one of two shapes depending on whether the
- *     person's source field is private — a `{"encrypted":true,"value":<wrapper>}` JSON envelope the
- *     service key decrypts, or the raw file bytes under the file's own Content-Type — and the
- *     handle hides the difference.
+ *     file bytes. That endpoint answers in one of three shapes — a
+ *     `{"encrypted":true,"value":<wrapper>}` JSON body the service key decrypts, an
+ *     `{"encrypted":false,"value":"<envelope>"}` JSON body carrying that envelope in the clear, or
+ *     the raw file bytes under the file's own Content-Type — and the handle hides the difference.
+ *     `pages()` and `metadata()` expose the rest of an envelope.
  *   - **Changes feed** — `processChanges` delegates to the {@link Pump}, injecting a
  *     `fetchChanges` closure (`GET /changes?limit=`, returning the raw ciphertext
  *     events) and a `decrypt` closure that builds a typed {@link Change}.
@@ -206,12 +207,14 @@ export class Client {
   /**
    * Fetch a company-facing binary file endpoint and classify its response.
    *
-   * The endpoint has TWO 200 shapes and which one arrives is not the company's to predict:
+   * The endpoint has THREE 200 shapes and which one arrives is not the company's to predict:
    * a person whose source field is PRIVATE yields `application/json`
-   * `{"encrypted":true,"value":<wrapper>}`, a person whose field is not yields the file's own
-   * Content-Type and the bytes themselves. The decision is made on `Content-Type` and never by
-   * sniffing the body — a PDF or an image that happened to start with a brace would be
-   * indistinguishable from a wrapper.
+   * `{"encrypted":true,"value":<wrapper>}`; a NON-PRIVATE source whose type stores more than one
+   * file or declares metadata entries yields `{"encrypted":false,"value":"<envelope>"}`; every
+   * other non-private source yields the file's own Content-Type and the bytes themselves. The
+   * bytes shape is told apart on `Content-Type` and never by sniffing the body — a PDF or an image
+   * that happened to start with a brace would be indistinguishable from a wrapper — and inside a
+   * JSON body it is `encrypted` that decides.
    *
    * A 410 `company_data.file_expired` (the answer's 90-day retention has elapsed) surfaces as an
    * {@link ApiError} whose `details` carry `content_sha256` and `expired_at`.
@@ -232,9 +235,24 @@ export class Client {
       return { encrypted: false, bytes: resp.body, contentType, contentSha256: digest };
     }
 
-    // Parsed through the client's OWN parser, not a hard-coded JSON.parse: an XML-configured client
-    // speaks XML on every other endpoint and must not silently lose it on this one.
-    const body = this.http.parseBody(resp, this.http.wantsXml);
+    // Parsed by what the RESPONSE says it is, never by the configured `format`: these four routes
+    // answer `application/json` on both structured arms whatever the client speaks, so a client
+    // configured for XML must not hand this body to its XML parser.
+    const body = this.http.parseBody(resp, lowered.includes('xml'));
+    // `encrypted: false` with a string `value` is the PLAINTEXT ENVELOPE arm; every other JSON body
+    // is the wrapper arm, which is what the bare-wrapper routes (a company's own contract copy, its
+    // run slot file) answer with.
+    if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+      const rec = body as Record<string, unknown>;
+      if (rec['encrypted'] === false && typeof rec['value'] === 'string') {
+        return {
+          encrypted: false,
+          envelope: rec['value'],
+          contentType: contentType !== '' ? contentType : null,
+          contentSha256: digest,
+        };
+      }
+    }
     const wrapper =
       body !== null && typeof body === 'object' && !Array.isArray(body) && 'value' in body
         ? ((body as Record<string, unknown>)['value'] as EncWrapper | string)

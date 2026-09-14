@@ -188,12 +188,14 @@ export class CompanyDataHandler {
     calls.push(CALL_CONNECTIONS);
     const connections: unknown[] = [];
     for await (const conn of client.connections()) {
-      const values = Object.entries(conn.values).map(([slug, v]) => ({
-        slug,
-        value: valueToJson(v.value),
-        live: v.live,
-        at: v.updatedAt?.toISOString() ?? null,
-      }));
+      const values = await Promise.all(
+        Object.entries(conn.values).map(async ([slug, v]) => ({
+          slug,
+          value: await valueToJson(v.value),
+          live: v.live,
+          at: v.updatedAt?.toISOString() ?? null,
+        })),
+      );
       connections.push({
         connectionId: conn.id,
         personId: conn.personId,
@@ -231,12 +233,12 @@ export class CompanyDataHandler {
     calls.push(CALL_PROCESS_CHANGES);
     const events: unknown[] = [];
     const seen = new Set<string>();
-    await client.processChanges((c: Change) => {
+    await client.processChanges(async (c: Change) => {
       if (c.id) {
         if (seen.has(c.id)) return; // idempotent: the pump may replay after a crash — dedup on Change.id
         seen.add(c.id);
       }
-      events.push(this.projectChange(c, null));
+      events.push(await this.projectChange(c, null));
     });
     return { events, drained: true };
   }
@@ -441,7 +443,7 @@ export class CompanyDataHandler {
     try {
       this.recordCall(run, CALL_PARSE_WEBHOOK);
       const change = await client.parseWebhook(rawBody, headers);
-      (run.events as unknown[]).push(this.projectChange(change, 'webhook'));
+      (run.events as unknown[]).push(await this.projectChange(change, 'webhook'));
     } catch (e) {
       if (!(e instanceof WebhookError)) throw e;
       // Verified but unparseable/undecryptable — acknowledge (200) and note it in the raw view.
@@ -509,7 +511,7 @@ export class CompanyDataHandler {
           seen.add(change.id);
           (run.seenFeedIds as string[]).push(change.id);
         }
-        (run.events as unknown[]).push(this.projectChange(change, 'feed'));
+        (run.events as unknown[]).push(await this.projectChange(change, 'feed'));
         appended = true;
       }
       if (appended || drainNew || buildNew) this.rt.writeRun(runId, run);
@@ -536,15 +538,21 @@ export class CompanyDataHandler {
    * labels a webhook delivery vs a pull-feed row (null for the changes scenario, where every row is a
    * pull-feed drain).
    */
-  private projectChange(c: Change, source: 'webhook' | 'feed' | null): Record<string, unknown> {
+  private async projectChange(
+    c: Change,
+    source: 'webhook' | 'feed' | null,
+  ): Promise<Record<string, unknown>> {
     const at = c.at?.toISOString() ?? null;
+    // Resolved ONCE and reused for both the projected value and its raw twin: the descriptor
+    // performs the handle's one lazy fetch, and asking twice would read the same answer twice.
+    const value = await valueToJson(c.value);
     const event: Record<string, unknown> = {
       event: c.event,
       personId: c.personId,
       shareCode: c.shareCode,
       customerType: c.customerType,
       slug: c.slug,
-      value: valueToJson(c.value),
+      value,
       live: c.live,
       at,
       documentId: c.documentId,
@@ -558,7 +566,7 @@ export class CompanyDataHandler {
         shareCode: c.shareCode,
         customerType: c.customerType,
         slug: c.slug,
-        value: valueToJson(c.value),
+        value,
         live: c.live,
         documentId: c.documentId,
         status: c.status,
@@ -582,15 +590,42 @@ export class CompanyDataHandler {
 
 /**
  * Render a decrypted value for JSON. A binary value is a lazy {@link BinaryHandle} — render a short
- * descriptor (its bytes are resolved lazily/async, not dumped into the result); a Date is ISO-8601; a
- * structured value stays an object/array so it remains valid JSON as-is.
+ * descriptor rather than dumping raw bytes; a Date is ISO-8601; a structured value stays an
+ * object/array so it remains valid JSON as-is.
+ *
+ * It is `async` because the handle's accessors are: resolving a descriptor performs the one lazy
+ * fetch and optional decrypt. Its callers await it.
  */
-function valueToJson(v: unknown): unknown {
+async function valueToJson(v: unknown): Promise<unknown> {
   if (v === null || v === undefined) return null;
   if (v instanceof Date) return v.toISOString();
-  if (v instanceof BinaryHandle) return '[binary value]';
+  if (v instanceof BinaryHandle) return binaryDescriptor(v);
   if (typeof v === 'bigint') return v.toString();
   return v; // string | number | boolean | object | array
+}
+
+/**
+ * The one-line descriptor every SDK example prints for a fetched binary.
+ *
+ * The PAGE COUNT for a multi-page envelope (whose `bytes()` has no single answer), the byte length
+ * otherwise, and the declared metadata keys whenever the envelope carries any — so a
+ * `legal_document` shows its byte length AND its `document_number`/`expiry_date`. Keys are sorted,
+ * because the metadata map carries no ordering guarantee.
+ */
+async function binaryDescriptor(handle: BinaryHandle): Promise<string> {
+  try {
+    const pages = await handle.pages();
+    let head =
+      pages.length > 0
+        ? `binary ${pages.length} pages`
+        : `binary ${(await handle.bytes()).length} bytes`;
+    const meta = await handle.metadata();
+    const keys = Object.keys(meta).sort();
+    if (keys.length > 0) head += `; meta: ${keys.join(', ')}`;
+    return `[${head}]`;
+  } catch {
+    return '[binary value]';
+  }
 }
 
 /**

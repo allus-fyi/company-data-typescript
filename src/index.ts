@@ -49,7 +49,7 @@ export {
   GCM_IV_LEN,
   GCM_TAG_LEN,
 } from './crypto.js';
-export type { EncWrapper, BinaryFetch, BinaryFetchResult, DecryptWrapper } from './crypto.js';
+export type { EncWrapper, BinaryFetch, BinaryFetchResult, BinaryPage, DecryptWrapper } from './crypto.js';
 
 // errors
 export {
