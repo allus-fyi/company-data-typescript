@@ -43,8 +43,8 @@ for (const c of vector.cases) {
   });
 }
 
-test('field validation vector has all 177 cases', () => {
-  assert.equal(vector.cases.length, 177);
+test('field validation vector has all 179 cases', () => {
+  assert.equal(vector.cases.length, 179);
 });
 
 for (const c of vector.resolve_cases) {
