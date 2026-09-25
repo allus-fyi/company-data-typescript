@@ -9,6 +9,8 @@
  * | DecryptError                   | Wrapper malformed, wrong key, or GCM tag mismatch. |
  * | WebhookError                   | Signature verification failed or an envelope couldn't be unwrapped. |
  * | RateLimitError(retryAfter)     | A 429 from a rate-limited endpoint (subclass of ApiError); carries Retry-After. |
+ * | ValidationError                | A value failed its field type, or a flow field's min/max (then `bound`/`boundValue`). |
+ * | PluginInputUnavailable         | A required plugin input is unwired, unanswered, another party's private value, or not convertible. |
  *
  * All errors extend a common {@link AllusError} base so a single `catch (e) { if (e
  * instanceof AllusError) … }` captures the whole taxonomy. `DecryptError` is raised
@@ -94,11 +96,52 @@ export class WebhookError extends AllusError {}
 export class ValidationError extends AllusError {
   readonly slug: string | null;
   readonly fieldType: string | null;
+  /**
+   * Set when a flow field's minimum or maximum refused the value: which bound (`min` | `max`) and
+   * the bound's value as the field's expression computed it. Null on a type failure.
+   */
+  readonly bound: 'min' | 'max' | null;
+  readonly boundValue: unknown;
 
-  constructor(slug: string | null, fieldType: string | null) {
-    super(`invalid ${fieldType} value for '${slug ?? 'value'}'`);
+  constructor(
+    slug: string | null,
+    fieldType: string | null,
+    bound: { bound: 'min' | 'max'; value: unknown } | null = null,
+  ) {
+    super(
+      bound === null
+        ? `invalid ${fieldType} value for '${slug ?? 'value'}'`
+        : `value for '${slug ?? 'value'}' is ${bound.bound === 'min' ? 'below its minimum' : 'above its maximum'} ${String(bound.value)}`,
+    );
     this.slug = slug;
     this.fieldType = fieldType;
+    this.bound = bound === null ? null : bound.bound;
+    this.boundValue = bound === null ? null : bound.value;
+  }
+}
+
+/** Why a plugin input could not be sent. */
+export type PluginInputReason = 'unwired' | 'unanswered' | 'other_party_private' | 'not_convertible';
+
+/**
+ * A plugin call could not be made because a REQUIRED input is unavailable.
+ *
+ * `input` is the plugin's input key, `source` the flow key it is wired to, and `reason` why it is
+ * unavailable: `unwired` (no source), `unanswered` (the source has no value yet),
+ * `other_party_private` (the source is another party's private value — never sent to a plugin) or
+ * `not_convertible` (the value does not convert to the input's declared type). An OPTIONAL input
+ * that is unavailable is left out of the call instead.
+ */
+export class PluginInputUnavailable extends AllusError {
+  readonly input: string;
+  readonly source: string | null;
+  readonly reason: PluginInputReason;
+
+  constructor(input: string, source: string | null, reason: PluginInputReason) {
+    super(`plugin input '${input}' is unavailable (${reason}${source ? `: ${source}` : ''})`);
+    this.input = input;
+    this.source = source;
+    this.reason = reason;
   }
 }
 

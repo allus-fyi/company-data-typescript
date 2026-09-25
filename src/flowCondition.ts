@@ -102,7 +102,7 @@ function str(v: unknown): string {
 // modifying them, so the 27-case condition vector stays byte-identical. A "constant" is
 // { key, label, result_type, expr }; computeConstants materialises each into a NEW slug->value
 // map (answers + {key:value}) in dependency order. null propagates. Pinned by
-// testdata/contract-flow-constants-vector.json (51 cases).
+// testdata/contract-flow-constants-vector.json (62 cases).
 
 interface FlowDate {
   y: number;
@@ -206,6 +206,18 @@ function evalExpr(expr: unknown, answers: Record<string, unknown>, referenceDate
     }
     case 'math': {
       const args = Array.isArray(e['args']) ? (e['args'] as unknown[]) : [];
+      // max/min are variadic and skip what is not a number: only the args that coerce to a
+      // FINITE number take part, so a null or text arg never nulls the whole result. They run
+      // before the null guard below for exactly that reason; no numeric arg at all -> null.
+      if (e['op'] === 'max' || e['op'] === 'min') {
+        const found: number[] = [];
+        for (const a of args) {
+          const n = toNum(evalExpr(a, answers, referenceDate));
+          if (n !== null && Number.isFinite(n)) found.push(n);
+        }
+        if (found.length === 0) return null;
+        return e['op'] === 'max' ? Math.max(...found) : Math.min(...found);
+      }
       const nums = args.map((a) => toNum(evalExpr(a, answers, referenceDate)));
       // Any null / non-numeric (incl. boolean) arg -> null; a non-finite arg (a
       // string like "1e309" coercing to Infinity) -> null (pinned non-finite policy).
@@ -343,13 +355,17 @@ export function computeConstants(
 }
 
 // Convenience: the resolved constant values ONLY (key -> value), without the source answers.
-// Mirrors the vector's `expect` shape (declared constant keys only). Same computation.
+// Same computation. `pluginSlugs` — the definition's plugin element slugs — expands every plugin
+// answer first (expandPluginAnswers), so a constant can read `slug`, `slug.<block>` and
+// `slug.<output>`; omit it when the flow has no plugin element.
 export function resolveConstants(
   constants: unknown,
   answers: Record<string, unknown>,
   referenceDate: unknown,
+  pluginSlugs?: readonly string[] | null,
 ): Record<string, unknown> {
-  const full = computeConstants(constants, answers, referenceDate);
+  const source = pluginSlugs != null ? expandPluginAnswers(answers, pluginSlugs) : answers;
+  const full = computeConstants(constants, source, referenceDate);
   const out: Record<string, unknown> = {};
   const list = Array.isArray(constants) ? (constants as unknown[]) : [];
   for (const cRaw of list) {
@@ -372,4 +388,187 @@ export function evaluateFlowCondition(
   referenceDate: unknown,
 ): boolean {
   return evaluateCondition(condition, computeConstants(constants, answers, referenceDate));
+}
+
+// ── Plugin answers. Pure; pinned by the shared constants vector. ──────────────────────────────
+// A plugin answer's plaintext is a self-describing JSON object:
+//   {"plugin","type","blocks":[{key,kind,label,id?,value}],"outputs":[{key,type,label,value}]}
+// An answer without an `outputs` array is unfinished.
+
+const PLUGIN_KEY = /^[a-z][a-z0-9_]{0,39}$/;
+
+function isPlainObject(v: unknown): v is Json {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+// The plaintext parsed as a JSON object, or null when it is not a string holding one.
+function parsePluginObject(plaintext: unknown): Json | null {
+  if (typeof plaintext !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plaintext);
+  } catch {
+    return null;
+  }
+  return isPlainObject(parsed) ? parsed : null;
+}
+
+// The blocks' values in stored order, each stringified, joined by " / ".
+function pluginSummary(answer: Json): string {
+  const blocks = Array.isArray(answer['blocks']) ? (answer['blocks'] as unknown[]) : [];
+  return blocks.map((b) => str(isPlainObject(b) ? b['value'] : null)).join(' / ');
+}
+
+/**
+ * Expand every plugin answer of `answers` into the keys a condition, a constant or a bound reads.
+ *
+ * Returns a NEW map; the input is not changed. For each slug of `pluginSlugs` whose answer is a
+ * string: a value that is not a JSON object is left as it is; a JSON object without an `outputs`
+ * array is an unfinished answer and its entry is REMOVED; a finished one is replaced by its
+ * summary (the blocks' values joined by " / ") and adds `slug.<block>` (the block's stored value),
+ * `slug.<block>.id` (a `search_select` block's picked id, as a string) and `slug.<output>` (the
+ * output's typed value). A block or output key that is `id` or does not match
+ * `^[a-z][a-z0-9_]{0,39}$`, and a null value, add nothing. A slug not in `pluginSlugs` is never
+ * touched.
+ */
+export function expandPluginAnswers(
+  answers: Record<string, unknown>,
+  pluginSlugs: readonly string[] | null | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(answers || {}) };
+  for (const slug of Array.isArray(pluginSlugs) ? pluginSlugs : []) {
+    if (typeof slug !== 'string' || !Object.prototype.hasOwnProperty.call(out, slug)) continue;
+    const answer = parsePluginObject(out[slug]);
+    if (answer === null) continue;
+    if (!Array.isArray(answer['outputs'])) {
+      delete out[slug];
+      continue;
+    }
+    out[slug] = pluginSummary(answer);
+    const blocks = Array.isArray(answer['blocks']) ? (answer['blocks'] as unknown[]) : [];
+    for (const b of blocks) {
+      if (!isPlainObject(b)) continue;
+      const key = b['key'];
+      if (typeof key !== 'string' || key === 'id' || !PLUGIN_KEY.test(key)) continue;
+      const value = b['value'] === undefined ? null : b['value'];
+      if (value !== null) out[`${slug}.${key}`] = value;
+      if (b['kind'] === 'search_select' && b['id'] !== undefined && b['id'] !== null) {
+        out[`${slug}.${key}.id`] = str(b['id']);
+      }
+    }
+    for (const o of answer['outputs'] as unknown[]) {
+      if (!isPlainObject(o)) continue;
+      const key = o['key'];
+      if (typeof key !== 'string' || key === 'id' || !PLUGIN_KEY.test(key)) continue;
+      const value = o['value'] === undefined ? null : o['value'];
+      if (value !== null) out[`${slug}.${key}`] = value;
+    }
+  }
+  return out;
+}
+
+/** A plugin answer's summary (its blocks' values joined by " / "), or null when it is unfinished or not one. */
+export function pluginAnswerSummary(plaintext: unknown): string | null {
+  const answer = parsePluginObject(plaintext);
+  if (answer === null || !Array.isArray(answer['outputs'])) return null;
+  return pluginSummary(answer);
+}
+
+/** A stored plugin answer in display form: the blocks, then the outputs, in stored order. */
+export interface PluginAnswerView {
+  blocks: { label: unknown; value: unknown }[];
+  outputs: { label: unknown; type: unknown; value: unknown }[];
+}
+
+/**
+ * A plugin answer for display — `{blocks: [{label, value}], outputs: [{label, type, value}]}` in
+ * stored order (a `search_select` block's value is its option label) — or null when the plaintext
+ * is not a JSON object with an `outputs` array.
+ */
+export function pluginAnswerView(plaintext: unknown): PluginAnswerView | null {
+  const answer = parsePluginObject(plaintext);
+  if (answer === null || !Array.isArray(answer['outputs'])) return null;
+  const blocks = Array.isArray(answer['blocks']) ? (answer['blocks'] as unknown[]) : [];
+  const member = (o: unknown, name: string): unknown => {
+    const v = isPlainObject(o) ? o[name] : undefined;
+    return v === undefined ? null : v;
+  };
+  return {
+    blocks: blocks.map((b) => ({ label: member(b, 'label'), value: member(b, 'value') })),
+    outputs: (answer['outputs'] as unknown[]).map((o) => ({
+      label: member(o, 'label'),
+      type: member(o, 'type'),
+      value: member(o, 'value'),
+    })),
+  };
+}
+
+// ── Helpers the SDK's own flow code reads (not part of the package's public surface). ───────
+
+/** Evaluate one constants-language expression over an answer map (a default, a min or a max). */
+export function evaluateFlowExpression(
+  expr: unknown,
+  answers: Record<string, unknown>,
+  referenceDate: unknown,
+): unknown {
+  return evalExpr(expr, answers, referenceDate);
+}
+
+/** The evaluator's own number coercion: a finite number, a numeric string, else null. */
+export function flowNumber(v: unknown): number | null {
+  const n = toNum(v);
+  return n !== null && Number.isFinite(n) ? n : null;
+}
+
+/** The evaluator's strict YYYY-MM-DD reading as a UTC-midnight epoch, or null. */
+export function flowDateUtc(v: unknown): number | null {
+  const d = parseFlowDate(v);
+  return d === null ? null : d.utc;
+}
+
+/** The evaluator's own stringification. */
+export function flowString(v: unknown): string {
+  return str(v);
+}
+
+/** Every key an expression reads: its `ref` keys and the fields of its `if` conditions. */
+export function flowExprRefs(expr: unknown): string[] {
+  const acc = new Set<string>();
+  const walkCond = (cond: unknown): void => {
+    if (!isPlainObject(cond)) return;
+    const op = typeof cond['op'] === 'string' ? (cond['op'] as string) : '';
+    if (op === 'and' || op === 'or' || op === 'not') {
+      for (const ch of Array.isArray(cond['children']) ? (cond['children'] as unknown[]) : []) walkCond(ch);
+      return;
+    }
+    if (typeof cond['field'] === 'string') acc.add(cond['field'] as string);
+  };
+  const walk = (node: unknown): void => {
+    if (!isPlainObject(node)) return;
+    switch (node['type']) {
+      case 'ref':
+        if (typeof node['key'] === 'string') acc.add(node['key'] as string);
+        return;
+      case 'if':
+        for (const cs of Array.isArray(node['cases']) ? (node['cases'] as unknown[]) : []) {
+          if (!isPlainObject(cs)) continue;
+          walkCond(cs['when']);
+          walk(cs['then']);
+        }
+        walk(node['else']);
+        return;
+      case 'concat':
+        for (const p of Array.isArray(node['parts']) ? (node['parts'] as unknown[]) : []) walk(p);
+        return;
+      case 'datediff':
+        walk(node['from']);
+        walk(node['to']);
+        return;
+      case 'math':
+        for (const a of Array.isArray(node['args']) ? (node['args'] as unknown[]) : []) walk(a);
+        return;
+    }
+  };
+  walk(expr);
+  return [...acc];
 }

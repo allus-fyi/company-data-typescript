@@ -41,6 +41,7 @@ import {
   constants as cryptoConstants,
   type KeyObject,
   createHash,
+  generateKeyPairSync,
 } from 'node:crypto';
 import { renameSync, unlinkSync, writeFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -62,18 +63,20 @@ export interface EncWrapper {
 }
 
 /**
- * Load an OpenSSL-encrypted PKCS#8 PEM into an in-memory private key handle.
+ * Load a PKCS#8 PEM into an in-memory private key handle.
  *
- * The PEM is PBES2 (PBKDF2-HMAC-SHA256 + AES-256-CBC, ~100k iters). Node's
- * `createPrivateKey` decrypts it with the passphrase (OpenSSL handles the SHA-256
- * PRF). The key is never written back to disk in plaintext.
+ * The platform's key downloads are OpenSSL-encrypted PEMs (PBES2 = PBKDF2-HMAC-SHA256 +
+ * AES-256-CBC, ~100k iters); Node's `createPrivateKey` decrypts one with the passphrase (OpenSSL
+ * handles the SHA-256 PRF). An UNENCRYPTED PKCS#8 PEM loads too — a plugin server's own key, for
+ * {@link pluginOpenRequest} — with the passphrase empty or null. The key is never written back to
+ * disk in plaintext.
  *
- * Config-only key handling: this is the single place a passphrase is used, driven
- * by `Config.keyPassphrase` — never passed in by application code.
+ * Config-only key handling: the client roles use this only with the configured passphrase —
+ * never one passed in by application code.
  */
-export function loadPrivateKey(encryptedPem: Buffer | string, passphrase: string): KeyObject {
+export function loadPrivateKey(encryptedPem: Buffer | string, passphrase: string | null): KeyObject {
   try {
-    return createPrivateKey({ key: encryptedPem, passphrase });
+    return createPrivateKey({ key: encryptedPem, passphrase: passphrase ?? '' });
   } catch (exc) {
     // A wrong passphrase / malformed PEM / unsupported algorithm all land here.
     throw new DecryptError(`could not load private key PEM: ${(exc as Error).message}`);
@@ -653,4 +656,84 @@ export function hashMatches(salt: string, expectedHash: string, plaintext: strin
   let diff = 0;
   for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ expectedHash.charCodeAt(i);
   return diff === 0;
+}
+
+// ── plugin sealing ────────────────────────────────────────────────────────────
+
+/** A reply key pair for one plugin call: the private half stays in memory, the public half travels. */
+export interface ReplyKeyPair {
+  privateKey: KeyObject;
+  /** The public half as base64 SPKI (DER), the `reply_key` of a plugin request. */
+  publicKeySpki: string;
+}
+
+/**
+ * Generate a fresh RSA-2048 reply key pair. A plugin seals its reply to the public half; only the
+ * caller holding the private half can open it.
+ */
+export function generateReplyKeyPair(): ReplyKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  return { privateKey, publicKeySpki: exportPublicKeySpki(publicKey) };
+}
+
+/** A public key as base64 SPKI (DER) — the form every platform key travels in. */
+export function exportPublicKeySpki(publicKey: KeyObject): string {
+  return (publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+}
+
+/**
+ * For a PLUGIN'S OWN SERVER: open the body of a `POST {base_url}/call` → the request object.
+ *
+ * `body` is the call's JSON body `{"request": "<wrapper string>"}` (raw or parsed);
+ * `privateKeyPem` is the plugin's own PKCS#8 PEM, encrypted (with `passphrase`) or not (`null`).
+ * The request carries `field_type`, `op`, `block`, `query`, `picks`, `values`, `inputs` and the
+ * caller's `reply_key` — seal the answer to it with {@link pluginSealReply}. This is a function
+ * for the plugin's server, never a call on the allme API.
+ *
+ * @throws DecryptError when the body, the wrapper or the key is not usable, or the plaintext is
+ *   not a JSON object. A plugin answers a request sealed to a key it no longer holds with
+ *   `409 {"error":"key_unknown"}`.
+ */
+export function pluginOpenRequest(
+  body: string | Buffer | Record<string, unknown>,
+  privateKeyPem: string | Buffer,
+  passphrase: string | null,
+): Record<string, unknown> {
+  let parsed: unknown = body;
+  if (typeof body === 'string' || Buffer.isBuffer(body)) {
+    try {
+      parsed = JSON.parse(body.toString());
+    } catch {
+      throw new DecryptError('plugin call body is not valid JSON');
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new DecryptError('plugin call body must be a JSON object');
+  }
+  const request = (parsed as Record<string, unknown>)['request'];
+  if (typeof request !== 'string' && (request === null || typeof request !== 'object')) {
+    throw new DecryptError("plugin call body has no 'request' wrapper");
+  }
+  const plaintext = decrypt(request as EncWrapper | string, loadPrivateKey(privateKeyPem, passphrase));
+  let opened: unknown;
+  try {
+    opened = JSON.parse(plaintext);
+  } catch {
+    throw new DecryptError('plugin request plaintext is not valid JSON');
+  }
+  if (opened === null || typeof opened !== 'object' || Array.isArray(opened)) {
+    throw new DecryptError('plugin request plaintext must be a JSON object');
+  }
+  return opened as Record<string, unknown>;
+}
+
+/**
+ * For a PLUGIN'S OWN SERVER: seal a reply to the request's `reply_key` → the response body
+ * `{"reply": "<wrapper string>"}`.
+ *
+ * `reply` is the reply plaintext: `{"options":[{id,label}],"more":bool}`,
+ * `{"outputs":{key: value|null}}` or `{"picks_invalid":true}`.
+ */
+export function pluginSealReply(reply: Record<string, unknown>, replyKeySpki: string): { reply: string } {
+  return { reply: JSON.stringify(encryptForPublicKey(JSON.stringify(reply), loadPublicKey(replyKeySpki))) };
 }

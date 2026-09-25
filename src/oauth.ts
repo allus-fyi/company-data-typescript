@@ -13,7 +13,7 @@ import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
 import { decrypt as cryptoDecrypt, hashMatches, loadPrivateKey, type EncWrapper } from './crypto.js';
-import { expiryPassed } from './models.js';
+import { expiryPassed, PluginValue } from './models.js';
 import { ApiError, AuthError, ConfigError } from './errors.js';
 import { FetchTransport, type HttpTransport, type Sleep } from './http.js';
 
@@ -146,6 +146,21 @@ export interface SignInResult {
 }
 
 const defaultSleep: Sleep = (seconds) => new Promise((res) => setTimeout(res, Math.max(0, seconds) * 1000));
+
+/**
+ * Read a plugin claim's value.
+ *
+ * An app that declares a plugin claim receives its answer in `values[name]` as a self-describing
+ * JSON string — the plugin's name, the field type, the blocks (labels, picked ids and option
+ * labels, typed values) and the outputs. A plugin answer is always one-time: it is asked at every
+ * sign-in. It is what the person's client submitted — sealed to the app key but not signed; an app
+ * that must rely on an output checks it with the plugin itself.
+ *
+ * @throws ValidationError when the value is not a JSON object with an `outputs` array.
+ */
+export function parsePluginValue(value: string): PluginValue {
+  return PluginValue.parse(value);
+}
 
 /** The RP-side "Sign in with allme" client. */
 export class OAuthClient {

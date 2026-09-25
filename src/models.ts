@@ -5,7 +5,7 @@
  * that turn a *hardened* API JSON object (slug-keyed `values`; NO person source
  * field) into typed objects, decrypting ciphertext via the injected crypto closures.
  *
- *     RequestField { slug, label, type, oneTime, mandatory, verified, verifiedMaxAgeDays }
+ *     RequestField { slug, label, type, oneTime, mandatory, verified, verifiedMaxAgeDays, plugin }
  *     Connection   { id, personId, displayName, connectedAt, values: {<slug>: Value} }
  *     Value        { value, live, updatedAt, verified, verifiedAt, verifiedExpiresAt,
  *                    verifiedMethod, verifiedProvider, verificationId }
@@ -24,6 +24,7 @@
  *   - primitive `multilist` → a parsed array
  *   - everything else → the plaintext string, whose grammar the registry's `validate()`
  *     states
+ *   - the reserved type key `plugin` is typed first, before the registry: a {@link PluginValue}
  *
  * Every model carries `.raw` — the underlying (hardened) API object — for debugging
  * or an edge case the SDK didn't model. It never contains the person's source field.
@@ -34,6 +35,7 @@
  */
 
 import { BinaryHandle, DecryptError, type BinaryFetch, type DecryptWrapper, type EncWrapper, hashMatches } from './crypto.js';
+import { ValidationError } from './errors.js';
 import { FieldTypeRegistry } from './fieldTypes.js';
 
 /** A type resolver: slug -> the request field's type (e.g. "email", "photo"). */
@@ -144,6 +146,12 @@ export class RequestField {
      */
     readonly verifiedMaxAgeDays: number | null,
     readonly raw: Json,
+    /**
+     * The plugin behind a plugin row (`type === 'plugin'`): `{pluginName, fieldType, snapshot}`,
+     * where `snapshot` is the field type's frozen description (blocks, inputs, outputs). Null on
+     * every other row, and on an API that does not send it.
+     */
+    readonly plugin: RequestFieldPlugin | null = null,
   ) {}
 
   static fromApi(obj: Json): RequestField {
@@ -157,6 +165,7 @@ export class RequestField {
       Boolean(coerceBool(obj['verified'])),
       coerceInt(obj['verified_max_age_days']),
       obj,
+      RequestFieldPlugin.fromApi(obj['plugin']),
     );
   }
 
@@ -164,6 +173,108 @@ export class RequestField {
   static listFromApi(body: unknown): RequestField[] {
     const items = listOf(body, 'request_fields');
     return items.map((o) => RequestField.fromApi(o));
+  }
+}
+
+/** The plugin a plugin request row or flow row asks through. */
+export class RequestFieldPlugin {
+  constructor(
+    readonly pluginName: string | null,
+    readonly fieldType: string | null,
+    /** The field type's frozen description: `{plugin_name, host, label, blocks, inputs, outputs}`. */
+    readonly snapshot: Json | null,
+    readonly raw: Json,
+  ) {}
+
+  /** Parse-permissive: anything but an object is "no plugin". */
+  static fromApi(value: unknown): RequestFieldPlugin | null {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const o = value as Json;
+    const snapshot = o['snapshot'];
+    return new RequestFieldPlugin(
+      o['plugin_name'] != null ? String(o['plugin_name']) : null,
+      o['field_type'] != null ? String(o['field_type']) : null,
+      snapshot !== null && typeof snapshot === 'object' && !Array.isArray(snapshot) ? (snapshot as Json) : null,
+      o,
+    );
+  }
+}
+
+// ── plugin values ────────────────────────────────────────────────────────────
+
+/** One block of a plugin answer: a pick (`id` + its option label as `value`) or a typed value. */
+export interface PluginBlock {
+  key: string | null;
+  kind: string | null;
+  label: string | null;
+  /** The picked option's id on a `search_select` block; null on a typed block. */
+  id: string | null;
+  value: unknown;
+}
+
+/** One output of a plugin answer, typed as the plugin declared it. */
+export interface PluginOutput {
+  key: string | null;
+  type: string | null;
+  label: string | null;
+  value: unknown;
+}
+
+/**
+ * A plugin answer — the value of a row whose type key is `plugin`, and of a plugin claim.
+ *
+ * The answer describes itself: the plugin's name, the field type, the blocks in declared order
+ * (labels, picked ids and option labels, typed values) and the outputs, so reading it never needs
+ * the plugin. It is what the answering client submitted — sealed but not signed; a company that
+ * must rely on an output checks it with the plugin itself.
+ */
+export class PluginValue {
+  constructor(
+    readonly plugin: string | null,
+    readonly type: string | null,
+    readonly blocks: PluginBlock[],
+    readonly outputs: PluginOutput[],
+    readonly raw: Json,
+  ) {}
+
+  /**
+   * Parse a plugin answer's plaintext.
+   *
+   * @throws ValidationError when the plaintext is not a JSON object with an `outputs` array.
+   */
+  static parse(plaintext: string): PluginValue {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(plaintext);
+    } catch {
+      parsed = null;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new ValidationError(null, 'plugin');
+    }
+    const o = parsed as Json;
+    if (!Array.isArray(o['outputs'])) throw new ValidationError(null, 'plugin');
+    const text = (v: unknown): string | null => (v === undefined || v === null ? null : String(v));
+    const objects = (v: unknown): Json[] =>
+      Array.isArray(v) ? (v.filter((x) => x !== null && typeof x === 'object' && !Array.isArray(x)) as Json[]) : [];
+    return new PluginValue(
+      text(o['plugin']),
+      text(o['type']),
+      objects(o['blocks']).map((b) => ({
+        key: text(b['key']),
+        kind: text(b['kind']),
+        label: text(b['label']),
+        id: text(b['id']),
+        value: b['value'] === undefined ? null : b['value'],
+      })),
+      objects(o['outputs']).map((out) => ({
+        key: text(out['key']),
+        type: text(out['type']),
+        label: text(out['label']),
+        value: out['value'] === undefined ? null : out['value'],
+      })),
+      o,
+    );
   }
 }
 
@@ -263,6 +374,15 @@ function typedValue(
   },
 ): unknown {
   const ftype = (opts.fieldType ?? '').toLowerCase();
+
+  // The type key `plugin` is reserved and never a registry row: a plugin answer is a
+  // self-describing JSON object, typed here before the registry is consulted.
+  if (ftype === 'plugin') {
+    const cipher = obj['value'];
+    if (cipher === undefined || cipher === null) return null;
+    return PluginValue.parse(opts.decryptValue(cipher as EncWrapper | string));
+  }
+
   const definition = opts.fieldTypes.resolve(ftype);
 
   // Binary → a lazy handle over the slot value_url (no eager fetch/decrypt).
@@ -795,6 +915,12 @@ export class FlowRun {
      */
     readonly participants: FlowRunParticipant[],
     readonly raw: Json,
+    /**
+     * The slugs whose answers came from a private source (a party's private field, a plugin called
+     * with a private input, a default filled from one). Metadata, never a value. Null when the API
+     * did not send the list — unknown, which the SDK treats as private for every other party.
+     */
+    readonly privateSlugs: string[] | null = null,
   ) {}
 
   /** The party key the company is bound to (`bindings[key] === companyUserId`). */
@@ -866,6 +992,9 @@ export class FlowRun {
       parseIsoDate(o['updated_at']),
       participants,
       o,
+      Array.isArray(o['private_slugs'])
+        ? (o['private_slugs'] as unknown[]).filter((x) => x !== null && x !== undefined).map((x) => String(x))
+        : null,
     );
   }
 }

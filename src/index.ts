@@ -45,11 +45,15 @@ export {
   decrypt,
   encryptForPublicKey,
   computePlainSha256,
+  generateReplyKeyPair,
+  exportPublicKeySpki,
+  pluginOpenRequest,
+  pluginSealReply,
   BinaryHandle,
   GCM_IV_LEN,
   GCM_TAG_LEN,
 } from './crypto.js';
-export type { EncWrapper, BinaryFetch, BinaryFetchResult, BinaryPage, DecryptWrapper } from './crypto.js';
+export type { EncWrapper, BinaryFetch, BinaryFetchResult, BinaryPage, DecryptWrapper, ReplyKeyPair } from './crypto.js';
 
 // errors
 export {
@@ -61,7 +65,9 @@ export {
   WebhookError,
   RateLimitError,
   ValidationError,
+  PluginInputUnavailable,
 } from './errors.js';
+export type { PluginInputReason } from './errors.js';
 
 // the field-type registry (value shape + value validation)
 export {
@@ -95,8 +101,14 @@ export {
   FlowRun,
   FlowRunParticipant,
   LogEntry,
+  PluginValue,
+  RequestFieldPlugin,
 } from './models.js';
-export type { TypeForSlug } from './models.js';
+export type { TypeForSlug, PluginBlock, PluginOutput } from './models.js';
+
+// plugin fields on a flow step (the company party's calls through the forwarder)
+export { PluginPass, PluginOptions, PluginOutputs, PluginPicksInvalid } from './flowPlugins.js';
+export type { PluginPassPlugin, PluginOption } from './flowPlugins.js';
 
 // contract-flow condition evaluator + computed constants
 export {
@@ -104,7 +116,11 @@ export {
   computeConstants,
   resolveConstants,
   evaluateFlowCondition,
+  expandPluginAnswers,
+  pluginAnswerSummary,
+  pluginAnswerView,
 } from './flowCondition.js';
+export type { PluginAnswerView } from './flowCondition.js';
 
 // changes pump
 export { FileBuffer } from './buffer.js';
@@ -125,7 +141,7 @@ export { verifyWebhook, parseWebhook, handleWebhook, decodeWebhookPayload, loadA
 export type { Headers } from './webhooks.js';
 
 // "Sign in with allme" — RP-side OAuth
-export { OAuthClient, DEFAULT_AUTHORIZE_URL } from './oauth.js';
+export { OAuthClient, DEFAULT_AUTHORIZE_URL, parsePluginValue } from './oauth.js';
 export type {
   Attestation,
   Claim,

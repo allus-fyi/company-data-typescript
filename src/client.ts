@@ -61,7 +61,21 @@ import {
 } from './crypto.js';
 import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError, WebhookError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
-import { computeConstants, evaluateCondition } from './flowCondition.js';
+import { computeConstants, evaluateCondition, expandPluginAnswers } from './flowCondition.js';
+import {
+  PluginPass,
+  PluginOptions,
+  PluginOutputs,
+  PluginPicksInvalid,
+  callPlugin,
+  checkFlowBounds,
+  isDraftPrivate,
+  liveAnswerMap,
+  outputsResult,
+  pluginSlugsOf,
+  preparePluginCall,
+  type FlowPartyView,
+} from './flowPlugins.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
 import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
@@ -1260,6 +1274,11 @@ export class Client {
    * Resolves to the refreshed {@link FlowRun}. A document-mode leaf leaves the run
    * `generating` — call {@link generateFlowDocument} (or {@link processFlowRun},
    * which chains it).
+   *
+   * A value below its field's `min` or above its `max` — each computed over the run's answers,
+   * this fill and the flow's constants — is refused with a {@link ValidationError} naming the
+   * bound before anything is encrypted. A value whose field's default reads another party's
+   * private source is submitted marked `source_private`.
    */
   async submitFlowAnswers(
     run: FlowRun,
@@ -1270,6 +1289,10 @@ export class Client {
     const answersSoFar = this.decryptRunAnswers(run);
     const full: Record<string, unknown> = { ...answersSoFar, ...fill };
     const svcPub = this.servicePublicKey();
+    // Bounds read the same live answer map the plugin calls read: stored answers, this fill as
+    // the current step's draft, plugin answers expanded, constants computed.
+    const view = this.flowPartyView(run);
+    const live = liveAnswerMap(view, fill);
 
     const answersOut: Json[] = [];
     for (const [slug, val] of Object.entries(fill)) {
@@ -1294,13 +1317,18 @@ export class Client {
           throw new ValidationError(slug, ftype);
         }
       }
+      checkFlowBounds(run.definition, slug, val, live, run.referenceDate);
       const values: Json[] = [];
       for (const uid of Object.values(run.bindings)) {
         const key =
           uid === run.serviceUserId ? svcPub : await this.flowPersonPublicKey(run, uid, partyPubKeys);
         values.push({ for_user_id: uid, value: encryptForPublicKey(plain, key) });
       }
-      answersOut.push({ slug, values });
+      const answer: Json = { slug, values };
+      // A value whose field's default reads another party's private source is private too, so
+      // every later reader treats it as one.
+      if (isDraftPrivate(view, slug, fill)) answer['source_private'] = true;
+      answersOut.push(answer);
     }
 
     const nxt = computeNext(run.definition, run.currentNode, full, run.referenceDate);
@@ -1313,6 +1341,101 @@ export class Client {
     }
     const res = await this.http.post(`${FLOW_RUNS}/${run.id}/answers`, { json: body });
     return FlowRun.fromApi(asJson(res));
+  }
+
+  // ── plugin fields on the company's turn ─────────────────────────────────────
+
+  /** This party's view of a run: its readable answers, the privacy list, its own party keys. */
+  private flowPartyView(run: FlowRun): FlowPartyView {
+    const own = new Set<string>();
+    for (const [key, uid] of Object.entries(run.bindings)) if (uid === run.serviceUserId) own.add(key);
+    return {
+      definition: run.definition,
+      currentNode: run.currentNode,
+      referenceDate: run.referenceDate,
+      stored: this.decryptRunAnswers(run),
+      privateSlugs: run.privateSlugs,
+      ownPartyKeys: own,
+    };
+  }
+
+  /**
+   * Refuse a value outside its flow field's `min`/`max` without submitting anything.
+   *
+   * The bounds are computed over the live answer map: the run's answers, overlaid with `draft` —
+   * the current step's other not-yet-submitted answers — and `value` for `slug`, plugin answers
+   * expanded, constants computed. A bound that computes to null is no bound.
+   * {@link submitFlowAnswers} applies the same check to every value it submits.
+   *
+   * @throws ValidationError naming the bound (`bound`, `boundValue`).
+   */
+  checkFlowValue(run: FlowRun, slug: string, value: unknown, draft: Record<string, unknown> = {}): void {
+    const live = liveAnswerMap(this.flowPartyView(run), { ...draft, [slug]: value });
+    checkFlowBounds(run.definition, slug, value, live, run.referenceDate);
+  }
+
+  /**
+   * A pass for the plugin fields of the run's current step — `POST
+   * /api/company-data/flow-runs/{runId}/plugin-pass`. Issued only while the run awaits the
+   * company's party on that step; it lives ten minutes. {@link pluginOptions} and
+   * {@link pluginOutputs} fetch one themselves.
+   */
+  async pluginPass(runId: string): Promise<PluginPass> {
+    return PluginPass.fromApi(asJson(await this.http.post(`${FLOW_RUNS}/${runId}/plugin-pass`, {})));
+  }
+
+  /**
+   * Ask the plugin behind the current step's plugin field `slug` for the options of one block.
+   *
+   * `query` is the search text (`""` lists everything), `picks` the ids picked so far by block
+   * key, `values` the typed block values so far, and `draft` the current step's not-yet-submitted
+   * answers (slug → plaintext) the plugin's inputs may read. Inputs come from the run's answers
+   * overlaid with `draft`, plugin answers expanded, constants computed; another party's private
+   * value is never sent ({@link PluginInputUnavailable}). The call goes to the forwarder over a
+   * plain transport, sealed to the plugin's key, with a fresh reply key.
+   */
+  async pluginOptions(
+    runId: string,
+    slug: string,
+    block: string,
+    query: string = '',
+    picks: Record<string, string> = {},
+    values: Record<string, unknown> = {},
+    draft: Record<string, unknown> = {},
+  ): Promise<PluginOptions> {
+    const [run, pass] = await Promise.all([this.flowRun(runId), this.pluginPass(runId)]);
+    const call = preparePluginCall(this.flowPartyView(run), pass, slug, draft);
+    const reply = await callPlugin(pass, () => this.pluginPass(runId), call, {
+      op: 'options',
+      block,
+      query,
+      picks,
+      values,
+    });
+    return PluginOptions.fromReply(reply);
+  }
+
+  /**
+   * Ask the plugin behind plugin field `slug` for its outputs for `picks` and `values` → a
+   * {@link PluginOutputs}, or {@link PluginPicksInvalid} when the picks no longer fit the inputs
+   * or each other (clear them and pick again). Same inputs, `draft` and privacy rule as
+   * {@link pluginOptions}. A caller that changes an input calls this again before it submits.
+   */
+  async pluginOutputs(
+    runId: string,
+    slug: string,
+    picks: Record<string, string> = {},
+    values: Record<string, unknown> = {},
+    draft: Record<string, unknown> = {},
+  ): Promise<PluginOutputs | PluginPicksInvalid> {
+    const [run, pass] = await Promise.all([this.flowRun(runId), this.pluginPass(runId)]);
+    const call = preparePluginCall(this.flowPartyView(run), pass, slug, draft);
+    const reply = await callPlugin(pass, () => this.pluginPass(runId), call, {
+      op: 'outputs',
+      picks,
+      values,
+    });
+    return outputsResult(reply);
   }
 
   /**
@@ -1436,7 +1559,8 @@ function nodeByKey(definition: Json, key: string | null): Json | null {
 
 /**
  * The next node after `fromKey`: ordered outgoing edges, first match wins.
- * Conditions use the answers plus computed constants at the run reference date.
+ * Conditions use the answers — plugin answers expanded — plus computed constants at the run
+ * reference date.
  * Returns a leaf when no outgoing edge matches.
  */
 function computeNext(
@@ -1450,7 +1574,11 @@ function computeNext(
     .filter((e): e is Json => e !== null && typeof e === 'object' && !Array.isArray(e) && (e as Json)['from'] === fromKey)
     .sort((a, b) => Number((a as Json)['sort'] ?? 0) - Number((b as Json)['sort'] ?? 0));
   if (edges.length === 0) return { leaf: true };
-  const materialized = computeConstants(definition['constants'], answers, referenceDate);
+  const materialized = computeConstants(
+    definition['constants'],
+    expandPluginAnswers(answers, pluginSlugsOf(definition)),
+    referenceDate,
+  );
   for (const e of edges) {
     if (evaluateCondition(e['condition'], materialized)) {
       return { leaf: false, nextNode: String(e['to']) };

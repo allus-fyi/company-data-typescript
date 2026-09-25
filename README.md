@@ -445,6 +445,7 @@ PRIMITIVE, so a type added as a row types itself with no SDK release.
 | primitive `composite` | a parsed `object` — the decrypted plaintext is a JSON object, parsed for you |
 | primitive `date` | a `Date` (UTC midnight; falls back to the raw string if it can't be parsed) |
 | primitive `multilist` | an array of the chosen option strings |
+| the reserved type key `plugin` (typed first, before the registry) | a `PluginValue` — see below |
 | anything else, and a type the registry does not carry | `string` |
 | unanswered / no value | `null` |
 
@@ -482,6 +483,32 @@ validator will enforce, or `null` when neither source has one. A choice with no 
 refused (rule name `options_unavailable`) rather than measured against an empty list.
 `submitFlowAnswers` passes the flow element's options for you.
 
+
+### Plugin rows — `RequestField.plugin` and `PluginValue`
+
+A company can ask a request row through a **plugin** it added in the portal. Such a row's `type` is
+the reserved key `plugin`, and its definition carries `plugin` —
+`RequestFieldPlugin { pluginName, fieldType, snapshot }`, `snapshot` being the field type's frozen
+description (`label`, `blocks`, `inputs`, `outputs`); every other row reads `plugin: null`. A plugin
+row is always one-time and is asked of people only.
+
+Its value is a `PluginValue` — the self-describing answer, readable without the plugin:
+
+```ts
+PluginValue {
+  plugin: string | null;          // the plugin's name, e.g. 'Flex'
+  type: string | null;            // the field type, e.g. 'cao'
+  blocks: { key, kind, label, id, value }[];   // declared order; a search_select pick carries id + its option label as value
+  outputs: { key, type, label, value }[];      // typed as the plugin declared them
+  raw: object;
+}
+
+const cao = conn.values['cao'].value as PluginValue;
+cao.outputs.find((o) => o.key === 'min_wage')?.value;   // 9.5
+```
+
+A plugin answer is what the person's client submitted — sealed to your service key but **not
+signed**. When you must rely on an output, check it with the plugin itself.
 
 ### Binary fields — the lazy `BinaryHandle`
 
@@ -890,6 +917,102 @@ identity(): Promise<{ company_user_id: string; service_id: string }>     // gap 
 * `flowRunDocument(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (a 404 `ApiError` until the run generates a document) — the honest completion step (fill → complete → `flowRunAnswers` → `flowRunDocument`).
 * `identity()` returns this client's `{ company_user_id, service_id }` from `GET /api/company-data/whoami`, so a `triggerFlowRun` binding's **company** party can bind to `company_user_id` (the person party's user_id comes from the connection).
 
+### Plugin fields on a flow step
+
+A flow step can hold a **plugin element** (`kind: 'plugin'`): blocks (`search_select`, `text`,
+`number`, `date`) answered by picks and typed values, inputs the company wired to earlier flow keys,
+and outputs the plugin computes. When such a step is the company's turn, the service client talks
+to the plugin through the platform's forwarder:
+
+```ts
+pluginPass(runId): Promise<PluginPass>
+pluginOptions(runId, slug, block, query = '', picks = {}, values = {}, draft = {}): Promise<PluginOptions>
+pluginOutputs(runId, slug, picks = {}, values = {}, draft = {}): Promise<PluginOutputs | PluginPicksInvalid>
+checkFlowValue(run, slug, value, draft = {}): void   // throws the bound ValidationError
+```
+
+* `pluginPass` — `POST /api/company-data/flow-runs/{runId}/plugin-pass` → `PluginPass { pass,
+  forwarderUrl, plugins: [{id, publicKey}], specs: {slug: spec} }`. Issued only while the run awaits
+  your party on that step; it lives ten minutes. The two calls below fetch one themselves.
+* `pluginOptions` — the options of one block: `query` is the search text (`''` lists everything),
+  `picks` the ids picked so far by block key, `values` the typed block values so far →
+  `PluginOptions { options: [{id, label}], more }` (`more`: the list was cut — narrow the query).
+* `pluginOutputs` — the outputs for `picks` and `values` → `PluginOutputs { outputs: {key: value} }`,
+  or `PluginPicksInvalid` (`picksInvalid === true`) when the picks no longer fit the inputs or each
+  other: clear them and pick again. **Call it again whenever an input changes**, before you submit.
+* `draft` is the current step's not-yet-submitted answers (`slug → plaintext`). The plugin's inputs
+  are read from ONE live answer map: the run's answers you can read, overlaid with `draft` for the
+  current step's slugs, plugin answers expanded, constants computed. Each input is converted to its
+  declared type (`number` → a JSON number, `date` → `YYYY-MM-DD`, `boolean` → a JSON boolean,
+  `text` → a string).
+* **Another party's private value is never sent to a plugin.** A source is private when its slug is
+  in the run's `privateSlugs`, when it is a constant that reads a private source, or when it is a
+  current-step draft value whose field's `default` reads a private source (whatever the draft value
+  is). A plugin answer's outputs are never private, whatever inputs produced them. A run
+  read with no `privateSlugs` list treats every other party's value as private. A REQUIRED input
+  that is unwired, unanswered, private or not convertible throws `PluginInputUnavailable` (`input`,
+  `source`, `reason`: `unwired` | `unanswered` | `other_party_private` | `not_convertible`); an
+  OPTIONAL one is left out of the call.
+* The call itself: the request is sealed to the plugin's public key with the platform wrapper and
+  carries the public half of a fresh RSA-2048 reply key made for that call; it is posted to
+  `{forwarderUrl}/call` with a plain `fetch` that carries **no allme credential** and uses the URL
+  exactly as the pass names it; the reply is opened with the reply key. A `409 plugin.key_changed`
+  reseals once with the key it returns; a 401 or 403 fetches a new pass once. Any other refusal is
+  an `ApiError` carrying the forwarder's status and key (`plugin.not_responding`, `plugin.busy`,
+  `plugin.rate_limited`, `plugin.unavailable`, …); a plugin that publishes no key reads
+  `plugin.not_responding`.
+
+The answer you then submit for the plugin slug is the plugin answer's JSON string:
+
+```ts
+const answer = JSON.stringify({
+  plugin: 'Flex', type: 'cao',
+  blocks: [{ key: 'cao', kind: 'search_select', label: 'CAO', id: 'hrc', value: 'Horeca Fictief' }, /* … */],
+  outputs: [{ key: 'min_wage', type: 'number', label: 'Minimum wage', value: 9.5 }, /* … */],
+});
+await client.submitFlowAnswers(run, { age: '19', cao: answer, wage: '14.20' });
+```
+
+Blocks go in declared order with their labels from the spec's `snapshot`; an answer without an
+`outputs` array is unfinished and reads as unanswered.
+
+**Defaults, minimums and maximums.** A flow field may carry `default`, `min` and `max`, each an
+expression in the constants language (plugin outputs included, e.g. `max(cao.min_wage,
+cao.agreement_wage)`). `submitFlowAnswers` computes `min`/`max` over the same live answer map (your
+`fill` as the draft) and refuses a value outside them with a `ValidationError` naming the bound
+(`bound`: `'min'` | `'max'`, `boundValue`) before anything is encrypted; a bound that computes to
+`null` is no bound; `checkFlowValue(run, slug, value, draft)` applies the same check on its own,
+before you submit. A value derived from another party's private source — a field whose `default` reads one — is submitted marked `source_private` (a run with no `privateSlugs` list counts every other party's
+value as private). Routing evaluates every edge over the answers with plugin answers expanded,
+plus the computed constants.
+
+**`FlowRun.privateSlugs`** lists the slugs whose answers came from a private source — metadata, never
+a value; `null` when the API did not send it (unknown).
+
+**The customer role.** `CustomerClient` has the same three with a leading `connectionId`, over
+`POST /api/company-connections/{connectionId}/flow-runs/{runId}/plugin-pass`, reading its inputs
+from its own copies of the run's answers (decrypted with the account key):
+
+```ts
+customer.pluginPass(connectionId, runId)
+customer.pluginOptions(connectionId, runId, slug, block, query, picks, values, draft)
+customer.pluginOutputs(connectionId, runId, slug, picks, values, draft)
+customer.checkFlowValue(run, slug, value, draft = {})   // throws the same bound ValidationError
+```
+
+Call `checkFlowValue` before `encryptFlowAnswer` seals a value — it applies the field's `min`/`max`
+over the live answer map. `customer.submitFlowAnswers` reads the run once and marks every answer
+derived from another party's private source (the same rule) `source_private: true` before it is
+sent.
+
+**The evaluator helpers** (exported, pure): `expandPluginAnswers(answers, pluginSlugs)` — a new map
+where each finished plugin answer becomes its summary (the blocks' values joined by `' / '`) plus
+`slug.<block>`, `slug.<block>.id` (a `search_select` pick's id) and `slug.<output>`, and an
+unfinished one is removed; `pluginAnswerSummary(plaintext)`; `pluginAnswerView(plaintext)` →
+`{blocks: [{label, value}], outputs: [{label, type, value}]}` or `null`;
+`resolveConstants(constants, answers, referenceDate, pluginSlugs?)` expands first when given the
+slugs. The math ops include variadic `max` and `min`, which skip what is not a number.
+
 ### Reacting to status changes in the pump
 
 When a recipient acts on a document (e.g. signs it), the feed emits a
@@ -1021,6 +1144,8 @@ captures the whole taxonomy.
 | `DecryptError` | A ciphertext wrapper is malformed, the key is wrong, or the GCM tag mismatches. Surfaces when a value is accessed/decrypted. |
 | `WebhookError` | Signature verification failed, or an envelope couldn't be unwrapped/parsed. |
 | `RateLimitError` | A 429 from a rate-limited endpoint. Subclass of `ApiError` (status fixed at 429); carries `retryAfter` (seconds, or `null`). |
+| `ValidationError` | A value failed its field type (`slug`, `fieldType`), or a flow field's minimum/maximum (`bound`, `boundValue`). |
+| `PluginInputUnavailable` | A required plugin input is unwired, unanswered, another party's private value, or not convertible (`input`, `source`, `reason`). |
 
 ```ts
 import {
@@ -1178,6 +1303,32 @@ the caller. `completeSignIn` is implemented on top of this method. `fallbackMode
 `userinfo` itself omits `mode` — pass the mode your own token response carried, or omit it if you have
 none.
 
+
+**Plugin claims.** An app may declare a plugin claim; its answer arrives in `values[name]` as the
+plugin answer's JSON string. Read it with `parsePluginValue(value)` → `PluginValue` (`plugin`,
+`type`, `blocks`, `outputs`; a `ValidationError` when the value is not a finished plugin answer). A
+plugin answer is always one-time — the consent screen asks it at every sign-in — and is sealed to
+your app key but not signed: check an output with the plugin itself when you must rely on it.
+
+## Building a plugin
+
+A plugin is your own HTTPS service: `GET {base_url}/manifest` describes it (with your RSA-2048
+public key) and `POST {base_url}/call` answers sealed requests. The SDK carries the sealing for
+your server — functions for the plugin's server, never calls on the allme API:
+
+```ts
+import { pluginOpenRequest, pluginSealReply, generateReplyKeyPair, exportPublicKeySpki } from '@allus-fyi/company-data';
+
+// POST /call — body {"request": "<wrapper string>"}
+const req = pluginOpenRequest(rawBody, readFileSync('plugin-key.pem'), null);   // unencrypted PKCS#8, or pass its passphrase
+// req = {field_type, op: 'options'|'outputs', block?, query?, picks, values, inputs, reply_key}
+res.json(pluginSealReply({ options: [{ id: 'hrc', label: 'Horeca Fictief' }], more: false }, req.reply_key as string));
+```
+
+`loadPrivateKey(pem, passphrase)` accepts an unencrypted PKCS#8 PEM with a `null` passphrase.
+`generateReplyKeyPair()` makes an RSA-2048 pair (`{privateKey, publicKeySpki}`) and
+`exportPublicKeySpki(key)` exports a public key as base64 SPKI. A request sealed to a key your plugin
+no longer holds should be answered `409 {"error":"key_unknown"}`.
 
 ## 2FA by allme (#436, #481)
 

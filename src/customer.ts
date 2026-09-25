@@ -20,6 +20,19 @@ import { ConfigError, ValidationError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { Change, Document, FlowRun } from './models.js';
+import {
+  PluginPass,
+  PluginOptions,
+  PluginOutputs,
+  PluginPicksInvalid,
+  callPlugin,
+  checkFlowBounds,
+  isDraftPrivate,
+  liveAnswerMap,
+  outputsResult,
+  preparePluginCall,
+  type FlowPartyView,
+} from './flowPlugins.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
 import { handleWebhook, loadAccountKey, parseWebhook, verifyWebhook, type Headers } from './webhooks.js';
@@ -297,12 +310,152 @@ export class CustomerClient {
     );
   }
 
+  /**
+   * Submit this party's turn. `body` carries the already-encrypted per-party `answers`; use
+   * {@link encryptFlowAnswer} to build the copies and {@link checkFlowValue} first to apply a
+   * field's minimum and maximum.
+   *
+   * Every answer whose field's default reads another party's private source is marked
+   * `source_private: true` before it is sent (the run is read once for the rule), so every later
+   * reader treats it as private.
+   */
   async submitFlowAnswers(connectionId: string, runId: string, body: Record<string, unknown>): Promise<unknown> {
+    const answers = body['answers'];
+    if (Array.isArray(answers) && answers.length > 0) {
+      const view = this.flowPartyView(await this.flowRun(connectionId, runId), false);
+      const slugs: Record<string, unknown> = {};
+      for (const a of answers) {
+        if (a && typeof a === 'object' && typeof (a as Record<string, unknown>)['slug'] === 'string') {
+          slugs[(a as Record<string, unknown>)['slug'] as string] = true;
+        }
+      }
+      body = {
+        ...body,
+        answers: answers.map((a) => {
+          if (!a || typeof a !== 'object') return a;
+          const slug = (a as Record<string, unknown>)['slug'];
+          return typeof slug === 'string' && isDraftPrivate(view, slug, slugs)
+            ? { ...(a as Record<string, unknown>), source_private: true }
+            : a;
+        }),
+      };
+    }
     return this.http.post(`${CONN}/${connectionId}/flow-runs/${runId}/answers`, { json: body });
   }
 
   async declineFlowRun(connectionId: string, runId: string): Promise<unknown> {
     return this.http.post(`${CONN}/${connectionId}/flow-runs/${runId}/decline`, {});
+  }
+
+  /**
+   * Refuse a value outside its flow field's `min`/`max` before {@link encryptFlowAnswer} seals it.
+   *
+   * The bounds are computed over the live answer map: this company's own copies of the run's
+   * answers (decrypted with the account key), overlaid with `draft` — the current step's other
+   * not-yet-submitted answers — and `value` for `slug`, plugin answers expanded, constants
+   * computed. A bound that computes to null is no bound.
+   *
+   * @throws ValidationError naming the bound, as the service `Client` does on submit.
+   */
+  checkFlowValue(run: FlowRun, slug: string, value: unknown, draft: Record<string, unknown> = {}): void {
+    const live = liveAnswerMap(this.flowPartyView(run), { ...draft, [slug]: value });
+    checkFlowBounds(run.definition, slug, value, live, run.referenceDate);
+  }
+
+  /**
+   * A pass for the plugin fields of the run's current step — `POST
+   * /api/company-connections/{connectionId}/flow-runs/{runId}/plugin-pass`. Issued only while the
+   * run awaits this company's party on that step.
+   */
+  async pluginPass(connectionId: string, runId: string): Promise<PluginPass> {
+    const body = await this.http.post(`${CONN}/${connectionId}/flow-runs/${runId}/plugin-pass`, {});
+    return PluginPass.fromApi(
+      body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {},
+    );
+  }
+
+  /**
+   * The options of one block of the current step's plugin field `slug`. Same contract as the
+   * service `Client.pluginOptions`, with a leading `connectionId`; the inputs are read from this
+   * company's own copies of the run's answers overlaid with `draft`.
+   */
+  async pluginOptions(
+    connectionId: string,
+    runId: string,
+    slug: string,
+    block: string,
+    query: string = '',
+    picks: Record<string, string> = {},
+    values: Record<string, unknown> = {},
+    draft: Record<string, unknown> = {},
+  ): Promise<PluginOptions> {
+    const [run, pass] = await Promise.all([this.flowRun(connectionId, runId), this.pluginPass(connectionId, runId)]);
+    const call = preparePluginCall(this.flowPartyView(run), pass, slug, draft);
+    const reply = await callPlugin(pass, () => this.pluginPass(connectionId, runId), call, {
+      op: 'options',
+      block,
+      query,
+      picks,
+      values,
+    });
+    return PluginOptions.fromReply(reply);
+  }
+
+  /**
+   * The outputs of the current step's plugin field `slug` for `picks` and `values`, or
+   * {@link PluginPicksInvalid}. Same contract as the service `Client.pluginOutputs`, with a
+   * leading `connectionId`.
+   */
+  async pluginOutputs(
+    connectionId: string,
+    runId: string,
+    slug: string,
+    picks: Record<string, string> = {},
+    values: Record<string, unknown> = {},
+    draft: Record<string, unknown> = {},
+  ): Promise<PluginOutputs | PluginPicksInvalid> {
+    const [run, pass] = await Promise.all([this.flowRun(connectionId, runId), this.pluginPass(connectionId, runId)]);
+    const call = preparePluginCall(this.flowPartyView(run), pass, slug, draft);
+    const reply = await callPlugin(pass, () => this.pluginPass(connectionId, runId), call, {
+      op: 'outputs',
+      picks,
+      values,
+    });
+    return outputsResult(reply);
+  }
+
+  /**
+   * This company's view of a run. It is bound to the party that owns the current step — the only
+   * step it answers or calls a plugin on — and reads its own answer copies with the account key
+   * (`withAnswers` false reads none: the privacy rule needs only the graph and the lists).
+   */
+  private flowPartyView(run: FlowRun, withAnswers = true): FlowPartyView {
+    let ownUid: string | null = null;
+    for (const n of (Array.isArray(run.definition['nodes']) ? run.definition['nodes'] : []) as Record<string, unknown>[]) {
+      if (n && typeof n === 'object' && n['key'] === run.currentNode && n['party'] != null) {
+        ownUid = run.bindings[String(n['party'])] ?? null;
+      }
+    }
+    const own = new Set<string>();
+    const stored: Record<string, unknown> = {};
+    if (ownUid !== null && ownUid !== '') {
+      for (const [key, uid] of Object.entries(run.bindings)) if (uid === ownUid) own.add(key);
+      for (const row of withAnswers ? run.answers : []) {
+        if (row['for_user_id'] !== ownUid) continue;
+        const slug = row['slug'];
+        const v = row['value'];
+        if (typeof slug !== 'string' || v == null) continue;
+        stored[slug] = this.decryptAccount(v as EncWrapper | string);
+      }
+    }
+    return {
+      definition: run.definition,
+      currentNode: run.currentNode,
+      referenceDate: run.referenceDate,
+      stored,
+      privateSlugs: run.privateSlugs,
+      ownPartyKeys: own,
+    };
   }
 
   /** Encrypt one answer value for one flow `party` per the P4 key rule. */

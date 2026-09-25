@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   resolveConstants,
   computeConstants,
+  expandPluginAnswers,
   evaluateFlowCondition,
   evaluateCondition,
 } from '../src/index.js';
@@ -26,6 +27,7 @@ interface Case {
   constants: unknown[];
   answers: Record<string, unknown>;
   reference_date: string;
+  plugin_slugs?: string[];
   expect: Record<string, unknown>;
 }
 
@@ -41,9 +43,19 @@ const conditionCases = (
   JSON.parse(readFileSync(CONDITION_VECTOR_PATH, 'utf8')) as { cases: ConditionCase[] }
 ).cases;
 
+// A case may carry `plugin_slugs`: its answers are expanded before the constants are computed,
+// and `expect` may then name expanded answer keys as well as constants.
 for (const c of cases) {
   test(`flow constants vector: ${c.name}`, () => {
-    assert.deepStrictEqual(resolveConstants(c.constants, c.answers, c.reference_date), c.expect);
+    const answers = c.plugin_slugs !== undefined ? expandPluginAnswers(c.answers, c.plugin_slugs) : c.answers;
+    const out = computeConstants(c.constants, answers, c.reference_date);
+    for (const [key, want] of Object.entries(c.expect)) {
+      assert.deepStrictEqual(out[key] === undefined ? null : out[key], want, `${c.name}.${key}`);
+    }
+    const resolved = resolveConstants(c.constants, c.answers, c.reference_date, c.plugin_slugs);
+    for (const key of Object.keys(resolved)) {
+      if (key in c.expect) assert.deepStrictEqual(resolved[key], c.expect[key], `${c.name}.${key} (resolveConstants)`);
+    }
   });
 }
 
@@ -73,6 +85,6 @@ for (const c of conditionCases) {
   });
 }
 
-test('flow constants vector has all 51 cases', () => {
-  assert.equal(cases.length, 51);
+test('flow constants vector has all 62 cases', () => {
+  assert.equal(cases.length, 62);
 });
