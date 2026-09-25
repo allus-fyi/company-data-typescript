@@ -61,7 +61,7 @@ import {
 } from './crypto.js';
 import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError, WebhookError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
-import { evaluateCondition } from './flowCondition.js';
+import { computeConstants, evaluateCondition } from './flowCondition.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
 import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
@@ -1303,7 +1303,7 @@ export class Client {
       answersOut.push({ slug, values });
     }
 
-    const nxt = computeNext(run.definition, run.currentNode, full);
+    const nxt = computeNext(run.definition, run.currentNode, full, run.referenceDate);
     const body: Json = { answers: answersOut };
     if (nxt.leaf) {
       body['leaf'] = true;
@@ -1363,7 +1363,7 @@ export class Client {
     if (node === null) return run;
     const answers = this.decryptRunAnswers(run);
     const fill = fillNode(node, answers) ?? {};
-    const wasLeaf = computeNext(run.definition, run.currentNode, { ...answers, ...fill }).leaf;
+    const wasLeaf = computeNext(run.definition, run.currentNode, { ...answers, ...fill }, run.referenceDate).leaf;
     run = await this.submitFlowAnswers(run, fill, { partyPubKeys: opts.partyPubKeys });
     const mode = run.outputMode ?? (run.definition['output_mode'] != null ? String(run.definition['output_mode']) : null);
     if (wasLeaf && mode === 'document') {
@@ -1435,22 +1435,24 @@ function nodeByKey(definition: Json, key: string | null): Json | null {
 }
 
 /**
- * The next node after `fromKey` — ordered outgoing edges, first match wins.
- * Returns `{nextNode}` or `{leaf:true}` (no outgoing edge, or none matched — a
- * dead-end is treated as a leaf, matching the platform engine).
+ * The next node after `fromKey`: ordered outgoing edges, first match wins.
+ * Conditions use the answers plus computed constants at the run reference date.
+ * Returns a leaf when no outgoing edge matches.
  */
 function computeNext(
   definition: Json,
   fromKey: string | null,
   answers: Record<string, unknown>,
+  referenceDate: unknown,
 ): { leaf: true } | { leaf: false; nextNode: string } {
   const edgesRaw = definition['edges'];
   const edges = (Array.isArray(edgesRaw) ? edgesRaw : [])
     .filter((e): e is Json => e !== null && typeof e === 'object' && !Array.isArray(e) && (e as Json)['from'] === fromKey)
     .sort((a, b) => Number((a as Json)['sort'] ?? 0) - Number((b as Json)['sort'] ?? 0));
   if (edges.length === 0) return { leaf: true };
+  const materialized = computeConstants(definition['constants'], answers, referenceDate);
   for (const e of edges) {
-    if (evaluateCondition(e['condition'], answers)) {
+    if (evaluateCondition(e['condition'], materialized)) {
       return { leaf: false, nextNode: String(e['to']) };
     }
   }
