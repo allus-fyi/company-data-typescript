@@ -4,7 +4,8 @@
  * `CustomerClient` is what a *connecting company* uses to consume and answer another
  * company's service over its `acct_*` credentials: list company↔company connections,
  * provide/edit typed answers to consent requests, read (and decrypt) issued documents,
- * run contract flows, drain the account change feed, and verify account-level webhooks.
+ * run contract flows — generating the contract of a run whose last step it answered — drain the
+ * account change feed, and verify account-level webhooks.
  * It reuses the same crash-safe {@link Pump}, webhook helpers, and hybrid-crypto core as
  * the service {@link Client}.
  *
@@ -15,7 +16,7 @@
 import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
-import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
+import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, oneTimeKeyBundle, type EncWrapper } from './crypto.js';
 import { ConfigError, ValidationError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
@@ -345,6 +346,33 @@ export class CustomerClient {
 
   async declineFlowRun(connectionId: string, runId: string): Promise<unknown> {
     return this.http.post(`${CONN}/${connectionId}/flow-runs/${runId}/decline`, {});
+  }
+
+  /**
+   * Generate the contract of a document-mode run whose LEAF this company answered — `POST
+   * /api/company-connections/{connectionId}/flow-runs/{runId}/generate`.
+   *
+   * The party that answers a run's last step generates. Submitting the leaf's answers leaves the run
+   * `generating`; pass the run as re-read then. The whole answer map comes from this company's OWN
+   * copy of the answers, decrypted with the account key — every party's answers are sealed to every
+   * bound party, so that copy holds the whole run and no service key is involved — and is sealed with
+   * {@link oneTimeKeyBundle}. Resolves to the API response `{document_id, documents, status}`
+   * (idempotent — a repeat answers the same document set).
+   *
+   * @throws ConfigError when the run's current step is not bound to this company — the participant
+   *   the run lists on `connectionId`.
+   */
+  async generateFlowDocument(connectionId: string, run: FlowRun): Promise<unknown> {
+    const ownUid = run.participants.find((p) => p.connectionId === connectionId)?.personUserId ?? null;
+    // The step is checked before anything is decrypted: another party's copies do not open with
+    // the account key.
+    const step = this.flowPartyView(run, false);
+    if (ownUid === null || ![...step.ownPartyKeys].some((key) => run.bindings[key] === ownUid)) {
+      throw new ConfigError(`run ${run.id} is not at a step this company answered`);
+    }
+    return this.http.post(`${CONN}/${connectionId}/flow-runs/${run.id}/generate`, {
+      json: oneTimeKeyBundle(this.flowPartyView(run).stored),
+    });
   }
 
   /**

@@ -249,6 +249,28 @@ export function encryptForPublicKey(plaintext: string, publicKey: KeyObject): En
 }
 
 /**
+ * The one-time-key bundle a flow run's `/generate` takes: the WHOLE answer map, sealed under a
+ * key used once and never stored.
+ *
+ * `answers` is `{slug: plaintext}` (a non-string value is JSON-encoded). A random 32-byte
+ * AES-256-GCM key encrypts `JSON(answers)`; the result is packed `iv(12)||ciphertext||tag(16)` and
+ * both halves are base64-encoded → `{otk, values}`. The server evaluates every leaf-PDF condition,
+ * constant and `{{tag}}` over this map, so a slug missing from it prints blank on the contract.
+ */
+export function oneTimeKeyBundle(answers: Record<string, unknown>): { otk: string; values: string } {
+  const map: Record<string, string> = {};
+  for (const [k, v] of Object.entries(answers)) {
+    map[k] = typeof v === 'string' ? v : JSON.stringify(v);
+  }
+  const otk = randomBytes(32);
+  const iv = randomBytes(GCM_IV_LEN);
+  const cipher = createCipheriv('aes-256-gcm', otk, iv);
+  const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(map), 'utf8')), cipher.final()]);
+  const blob = Buffer.concat([iv, ct, cipher.getAuthTag()]); // iv(12) || ciphertext || tag(16)
+  return { otk: otk.toString('base64'), values: blob.toString('base64') };
+}
+
+/**
  * One response from a company-facing binary file endpoint, in the shape a {@link BinaryHandle} needs.
  *
  * The route has THREE 200 shapes and the company cannot predict which it will get, because the

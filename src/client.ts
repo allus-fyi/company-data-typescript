@@ -56,6 +56,7 @@ import {
   encryptForPublicKey,
   loadPrivateKey,
   loadPublicKey,
+  oneTimeKeyBundle,
   type BinaryFetchResult,
   type EncWrapper,
 } from './crypto.js';
@@ -79,7 +80,7 @@ import {
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
 import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
-import { createCipheriv, createPublicKey, randomBytes } from 'node:crypto';
+import { createPublicKey } from 'node:crypto';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
 import { decodeWebhookPayload, loadAccountKey, verifyWebhook, type Headers } from './webhooks.js';
@@ -1441,25 +1442,12 @@ export class Client {
   /**
    * Document-mode company leaf: one-time-key value gather → POST /generate.
    *
-   * Builds a random 32-byte AES-256-GCM key, encrypts `JSON({slug: plaintext})` of
-   * the company's decrypted answers, packs `iv(12)||ciphertext||tag(16)`, and POSTs
-   * `{otk: base64(key), values: base64(blob)}`. Resolves to the API response
-   * `{document_id, status: "awaiting_signature"}` (idempotent).
+   * Seals the company's decrypted answers with {@link oneTimeKeyBundle} and POSTs
+   * `{otk, values}`. Resolves to the API response `{document_id, documents, status}`
+   * (idempotent — a repeat answers the same document set).
    */
   async generateFlowDocument(run: FlowRun): Promise<unknown> {
-    const answers = this.decryptRunAnswers(run);
-    const map: Record<string, string> = {};
-    for (const [k, v] of Object.entries(answers)) {
-      map[k] = typeof v === 'string' ? v : JSON.stringify(v);
-    }
-    const payload = Buffer.from(JSON.stringify(map), 'utf8');
-    const otk = randomBytes(32);
-    const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', otk, iv);
-    const ct = Buffer.concat([cipher.update(payload), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    const blob = Buffer.concat([iv, ct, tag]); // iv(12) || ciphertext || tag(16)
-    const body = { otk: otk.toString('base64'), values: blob.toString('base64') };
+    const body = oneTimeKeyBundle(this.decryptRunAnswers(run));
     return this.http.post(`${FLOW_RUNS}/${run.id}/generate`, { json: body });
   }
 
