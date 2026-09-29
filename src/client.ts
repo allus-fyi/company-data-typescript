@@ -79,8 +79,9 @@ import {
 } from './flowPlugins.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
-import { Change, Connection, Document, FlowRun, LogEntry, RequestField } from './models.js';
-import { createPublicKey } from 'node:crypto';
+import { Change, Connection, Document, FlowRun, LogEntry, PublishedFlow, RequestField } from './models.js';
+import { createHash, createPublicKey } from 'node:crypto';
+import { nonOwnerPartyTags, type PartyTag } from './flowText.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
 import type { DeadLetterRecord } from './buffer.js';
 import { decodeWebhookPayload, loadAccountKey, verifyWebhook, type Headers } from './webhooks.js';
@@ -1137,11 +1138,18 @@ export class Client {
   // ── contract-flow runs (company side — the company is a bound party) ─────────
 
   /**
+   * The latest PUBLISHED version of a flow → {@link PublishedFlow} (`version`, `definition` and the
+   * service's request-field types). `GET /api/company-data/flows/{flowId}/published`.
+   */
+  async publishedFlow(flowId: string): Promise<PublishedFlow> {
+    return PublishedFlow.fromApi(asJson(await this.http.get(`${FLOWS}/${flowId}/published`)));
+  }
+
+  /**
    * Start a run for a connection.
    *
    * `bindings` = `{party_key: user_id}` covering the flow's parties (each bound
-   * user must be the company or the connected person). Pins the flow's latest
-   * PUBLISHED version. `connectionId` is the person-side
+   * user must be the company or the connected person). `connectionId` is the person-side
    * `company_service_connections.id` for this service. Resolves to the created
    * {@link FlowRun} (status `awaiting_<entry node's party>`).
    *
@@ -1151,6 +1159,15 @@ export class Client {
    * not exactly that set is refused with {@link ApiError} `flows.source_files_invalid`, whose
    * `details` carry `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`); nothing
    * is written.
+   *
+   * Reads the flow's latest published version ({@link publishedFlow}) and pins it with
+   * `flow_version`. When that version's text elements show the connected customer's shared values
+   * (`{{party.field}}` tags), the SDK opens those values with the service key and seals them per
+   * recipient — one wrapper of the non-private values and one per private value, to the company
+   * (the service key) and to the customer (only its own private values) — and sends them as
+   * `tag_values`. A newer publish in between (`flows.version_changed`) is re-read and retried once;
+   * a customer key that changed (`flows.tag_values_stale`) is re-read and retried once. A stale
+   * SERVICE key is a {@link ConfigError}: rebuild the client with the service's current private key.
    */
   async triggerFlowRun(
     flowId: string,
@@ -1160,16 +1177,112 @@ export class Client {
       sourceFiles?: { source_key: string; for_user_id: string; file: string }[];
     },
   ): Promise<FlowRun> {
-    const body: Json = { target: { connection_id: opts.connectionId }, bindings: opts.bindings };
-    if (opts.sourceFiles && opts.sourceFiles.length > 0) {
-      body['source_files'] = opts.sourceFiles.map((s) => ({
-        source_key: s.source_key,
-        for_user_id: s.for_user_id,
-        file: s.file,
-      }));
+    let published = await this.publishedFlow(flowId);
+    let versionRetried = false;
+    let staleRetried = false;
+    let customerShareCode: string | null = null;
+    for (;;) {
+      const body: Record<string, unknown> = {
+        target: { connection_id: opts.connectionId },
+        bindings: opts.bindings,
+        flow_version: published.version,
+      };
+      if (opts.sourceFiles && opts.sourceFiles.length > 0) {
+        body['source_files'] = opts.sourceFiles.map((s) => ({
+          source_key: s.source_key,
+          for_user_id: s.for_user_id,
+          file: s.file,
+        }));
+      }
+      const tags = nonOwnerPartyTags(published.definition);
+      if (tags.length > 0) {
+        const compiled = await this.compileTagValues(tags, published, opts.connectionId);
+        customerShareCode = compiled.shareCode;
+        body['tag_values'] = compiled.tagValues;
+      }
+      try {
+        const created = await this.http.post(`${FLOWS}/${flowId}/runs`, { json: body });
+        return FlowRun.fromApi(asJson(created));
+      } catch (e) {
+        if (!(e instanceof ApiError)) throw e;
+        if (e.errorKey === 'flows.version_changed' && !versionRetried) {
+          versionRetried = true;
+          published = await this.publishedFlow(flowId);
+          continue;
+        }
+        if (e.errorKey === 'flows.tag_values_stale') {
+          const stale = Array.isArray(e.details['stale']) ? (e.details['stale'] as unknown[]) : [];
+          if (stale.includes('company')) {
+            throw new ConfigError(
+              'the configured service private key is not this service\'s current key — rebuild the client with the current service private key',
+            );
+          }
+          if (!staleRetried && customerShareCode) {
+            staleRetried = true;
+            this.invalidatePublicKey(customerShareCode);
+            continue;
+          }
+        }
+        throw e;
+      }
     }
-    const created = await this.http.post(`${FLOWS}/${flowId}/runs`, { json: body });
-    return FlowRun.fromApi(asJson(created));
+  }
+
+  /**
+   * The `tag_values` for one start: the connected customer's shared values the text names, opened
+   * with the service key and sealed to the company (the service key) and to the customer. A value
+   * that is absent or does not open is left out; `values_private` decides which are private (a slug
+   * it does not name is private).
+   */
+  private async compileTagValues(
+    tags: PartyTag[],
+    published: PublishedFlow,
+    connectionId: string,
+  ): Promise<{ tagValues: Record<string, unknown>; shareCode: string }> {
+    const detail = asJson(await this.http.get(`${CONNECTIONS}/${connectionId}`));
+    const userId = String(detail['user_id'] ?? '');
+    const shareCode = String(detail['share_code'] ?? '');
+    if (!userId || !shareCode) throw new ConfigError(`connection ${connectionId} has no customer key to seal the run's values to`);
+    const values = (detail['values'] ?? {}) as Record<string, unknown>;
+    const privacy = (detail['values_private'] ?? {}) as Record<string, unknown>;
+    const entries: { tag: string; isPrivate: boolean; value: { v: string; t: string | null } }[] = [];
+    for (const { tag, field } of tags) {
+      const cell = values[field];
+      const wrapper = cell !== null && typeof cell === 'object' ? (cell as Record<string, unknown>)['value'] : null;
+      if (typeof wrapper !== 'string' || wrapper === '') continue;
+      let v: string;
+      try {
+        v = cryptoDecrypt(wrapper, this.privateKey);
+      } catch {
+        continue;
+      }
+      if (v === '') continue;
+      entries.push({ tag, isPrivate: privacy[field] !== false, value: { v, t: published.requestFieldTypes[field] ?? null } });
+    }
+    const seal = (key: KeyObject, text: string): string => JSON.stringify(encryptForPublicKey(text, key));
+    const recipient = (key: KeyObject, withPrivate: boolean): Record<string, unknown> => {
+      const publicMap: Record<string, unknown> = {};
+      const priv: Record<string, string> = {};
+      for (const e of entries) {
+        if (!e.isPrivate) publicMap[e.tag] = e.value;
+        else if (withPrivate) priv[e.tag] = seal(key, JSON.stringify(e.value));
+      }
+      return {
+        recipient_pubkey_sha256: createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex'),
+        public: seal(key, JSON.stringify(publicMap)),
+        public_tags: Object.keys(publicMap),
+        private: priv,
+      };
+    };
+    // One bound customer: every private value the text names is its own.
+    const customerKey = await this.recipientPublicKey(shareCode);
+    return {
+      tagValues: {
+        company: recipient(this.servicePublicKey(), true),
+        [userId]: recipient(customerKey, true),
+      },
+      shareCode,
+    };
   }
 
   /**

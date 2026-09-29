@@ -104,8 +104,10 @@ export {
   LogEntry,
   PluginValue,
   RequestFieldPlugin,
+  PublishedFlow,
 } from './models.js';
-export type { TypeForSlug, PluginBlock, PluginOutput } from './models.js';
+export type { TypeForSlug, PluginBlock, PluginOutput, FlowRunTagValues } from './models.js';
+export { flowTextTags, nonOwnerPartyTags, type PartyTag } from './flowText.js';
 
 // plugin fields on a flow step (the company party's calls through the forwarder)
 export { PluginPass, PluginOptions, PluginOutputs, PluginPicksInvalid } from './flowPlugins.js';

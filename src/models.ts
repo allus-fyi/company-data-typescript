@@ -442,6 +442,11 @@ export class Connection {
     /** The customer's profile share code (previously only via `raw`); null when absent. */
     readonly shareCode: string | null,
     readonly raw: Json,
+    /**
+     * Per answered slug, whether its value is private — the source field's privacy, false for an
+     * answer with no source field. A slug absent here is private. Metadata only.
+     */
+    readonly valuesPrivate: Record<string, boolean> = {},
   ) {}
 
   /**
@@ -488,6 +493,13 @@ export class Connection {
 
     const customerTypeRaw = obj['customer_type'] ?? identity['customer_type'];
     const shareCodeRaw = obj['share_code'] ?? identity['share_code'];
+    const valuesPrivate: Record<string, boolean> = {};
+    const privateRaw = obj['values_private'];
+    if (privateRaw !== null && typeof privateRaw === 'object' && !Array.isArray(privateRaw)) {
+      for (const [slug, flag] of Object.entries(privateRaw as Record<string, unknown>)) {
+        if (typeof flag === 'boolean') valuesPrivate[slug] = flag;
+      }
+    }
     return new Connection(
       connId,
       personId,
@@ -497,6 +509,7 @@ export class Connection {
       customerTypeRaw != null ? String(customerTypeRaw) : null,
       shareCodeRaw != null ? String(shareCodeRaw) : null,
       obj,
+      valuesPrivate,
     );
   }
 }
@@ -952,8 +965,19 @@ export class FlowRun {
      * The viewer's own copies of the run's connection sources, `{source_key: file}` — the owning
      * company's on the service `Client`, the customer's own on `CustomerClient`. Empty when the run
      * holds none.
-     */
+    */
     readonly sourceFiles: Record<string, string> = {},
+    /**
+     * The owning company's profile values the run's owner-party text tags name, fixed at start:
+     * `"party.field"` → `{v, t}`. Null on a run whose text names none.
+     */
+    readonly ownerTagValues: Record<string, { v: string; t: string | null }> | null = null,
+    /**
+     * The company's sealed values for the run's non-owner party text tags, fixed at start:
+     * `{public, public_tags, private}` — `public` one wrapper of the non-private map, `private` one
+     * wrapper per private value, all sealed to the service key. Null on a run whose text names none.
+    */
+    readonly tagValues: FlowRunTagValues | null = null,
   ) {}
 
   /** The party key the company is bound to (`bindings[key] === companyUserId`). */
@@ -1028,6 +1052,74 @@ export class FlowRun {
         ? (o['private_slugs'] as unknown[]).filter((x) => x !== null && x !== undefined).map((x) => String(x))
         : null,
       sourceFilesOf(o['source_files']),
+      ownerTagValuesOf(o['owner_tag_values']),
+      tagValuesOf(o['tag_values']),
+    );
+  }
+}
+
+/** One recipient's sealed text-tag values of a run. */
+export interface FlowRunTagValues {
+  /** Wrapper JSON string of the non-private `{"party.field": {v, t}}` map. */
+  public: string;
+  /** The keys of that map. */
+  publicTags: string[];
+  /** `"party.field"` → wrapper JSON string of one private `{v, t}`. */
+  private: Record<string, string>;
+}
+
+function ownerTagValuesOf(raw: unknown): Record<string, { v: string; t: string | null }> | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out: Record<string, { v: string; t: string | null }> = {};
+  for (const [tag, cell] of Object.entries(raw as Record<string, unknown>)) {
+    if (cell === null || typeof cell !== 'object' || Array.isArray(cell)) continue;
+    const v = (cell as Json)['v'];
+    const t = (cell as Json)['t'];
+    if (typeof v === 'string') out[tag] = { v, t: typeof t === 'string' ? t : null };
+  }
+  return out;
+}
+
+function tagValuesOf(raw: unknown): FlowRunTagValues | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Json;
+  if (typeof o['public'] !== 'string') return null;
+  const priv: Record<string, string> = {};
+  const privRaw = o['private'];
+  if (privRaw !== null && typeof privRaw === 'object' && !Array.isArray(privRaw)) {
+    for (const [tag, w] of Object.entries(privRaw as Record<string, unknown>)) {
+      if (typeof w === 'string') priv[tag] = w;
+    }
+  }
+  return {
+    public: o['public'] as string,
+    publicTags: Array.isArray(o['public_tags']) ? (o['public_tags'] as unknown[]).filter((x) => typeof x === 'string') as string[] : [],
+    private: priv,
+  };
+}
+
+/** The latest published version of a flow — what {@link AllusClient.triggerFlowRun} compiles from. */
+export class PublishedFlow {
+  constructor(
+    readonly version: number,
+    readonly definition: Json,
+    /** The service's request fields: slug → field type. */
+    readonly requestFieldTypes: Record<string, string>,
+  ) {}
+
+  static fromApi(obj: Json): PublishedFlow {
+    const def = obj['definition'];
+    const types: Record<string, string> = {};
+    const raw = obj['request_field_types'];
+    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [slug, t] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof t === 'string') types[slug] = t;
+      }
+    }
+    return new PublishedFlow(
+      Number(obj['version'] ?? 0),
+      def !== null && typeof def === 'object' && !Array.isArray(def) ? (def as Json) : {},
+      types,
     );
   }
 }

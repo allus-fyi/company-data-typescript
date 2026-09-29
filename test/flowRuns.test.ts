@@ -130,7 +130,7 @@ function runObj(o: { status?: string; current?: string; answers?: unknown[]; def
 
 // ── trigger / list / get ──────────────────────────────────────────────────────
 
-test('triggerFlowRun posts target+bindings, parses FlowRun', async () => {
+test('triggerFlowRun posts target+bindings+flow_version, parses FlowRun', async () => {
   await withTmp(async (dir) => {
     const captured: { url?: string; body?: unknown } = {};
     const writeRouter: WriteRouter = (method, url, body) => {
@@ -138,13 +138,19 @@ test('triggerFlowRun posts target+bindings, parses FlowRun', async () => {
       captured.body = body?.json;
       return new FakeResponse(201, runObj());
     };
-    const client = makeClientRw(makeConfig(dir), NO_GET, writeRouter);
+    const publishedRouter: Router = (url) => {
+      assert.ok(url.endsWith('/company-data/flows/flow-1/published'));
+      return new FakeResponse(200, { version: 3, definition: { parties: [], nodes: [] }, request_field_types: {} });
+    };
+    const client = makeClientRw(makeConfig(dir), publishedRouter, writeRouter);
     const run = await client.triggerFlowRun('flow-1', {
       connectionId: 'csc-1',
       bindings: { company: COMPANY_UID, person: PERSON_UID },
     });
     assert.ok((captured.url as string).endsWith('/company-data/flows/flow-1/runs'));
     assert.deepEqual((captured.body as any).target, { connection_id: 'csc-1' });
+    assert.equal((captured.body as any).flow_version, 3);
+    assert.equal((captured.body as any).tag_values, undefined);
     assert.ok(run instanceof FlowRun);
     assert.equal(run.companyPartyKey, 'company');
     assert.equal(run.serviceUserId, COMPANY_UID);

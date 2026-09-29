@@ -925,6 +925,7 @@ for (const doc of own?.documents ?? []) {
   const pdf = await client.flowRunDocument(run.id, doc.outputKey!);
 }
 ```
+* `triggerFlowRun` reads the flow's latest published version first (`publishedFlow(flowId)` — its `version`, `definition` and the service's request-field types) and sends it as `flow_version`. When that version's text elements show the customer's shared values (`{{party.field}}` tags), it opens those values from the connection with the service key and seals them per recipient — ONE wrapper of the non-private values, and each private value on its own — to the company (the service key) and to the customer, and sends them as `tag_values`; the connection's `valuesPrivate` decides which values are private (a slug it does not name is private). A newer publish in between (`flows.version_changed`) is re-read and retried once; a customer key that changed (`flows.tag_values_stale`) is re-read and retried once; a stale SERVICE key raises a `ConfigError` — rebuild the client with the service's current private key. The run carries `ownerTagValues` (the owning company's profile values the text names, plaintext) and `tagValues` (the company's sealed set).
 * `identity()` returns this client's `{ company_user_id, service_id }` from `GET /api/company-data/whoami`, so a `triggerFlowRun` binding's **company** party can bind to `company_user_id` (the person party's user_id comes from the connection).
 
 ### Participant PDF sources, company-turn uploads and generation inputs
