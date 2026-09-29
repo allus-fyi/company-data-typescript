@@ -964,7 +964,7 @@ export class Client {
    *  - a PER-PERSON / private document is encrypted to the RECIPIENT's key and served as
    *    `{"encrypted":true,"value":{"_enc":1,…}}` — the company CANNOT decrypt that with its service key,
    *    so this fails clearly (`ApiError` `documents.recipient_encrypted`) rather than attempting a doomed
-   *    service-key decrypt. For a generated flow contract's OWN copy the company uses
+   *    service-key decrypt. For a generated flow document's OWN copy the company uses
    *    {@link flowRunDocument} — that copy IS service-key-encrypted.
    */
   async documentFile(documentId: string): Promise<Buffer> {
@@ -980,7 +980,7 @@ export class Client {
         0,
         'documents.recipient_encrypted',
         'This document is encrypted to its recipient and is not readable with the company service key. ' +
-          'For a generated flow contract, use flowRunDocument(runId) to download the company copy.',
+          'For a generated flow document, use flowRunDocument(runId, outputKey) to download the company copy.',
       );
     }
     return raw; // broadcast / plaintext bytes
@@ -1184,15 +1184,19 @@ export class Client {
   }
 
   /**
-   * Download the company's OWN copy of a run's generated flow contract — the PLAINTEXT
-   * file bytes. GETs `/flow-runs/{runId}/document/file`, which serves the company-party copy encrypted
-   * to the SERVICE key (unlike {@link documentFile}'s recipient-targeted copy), so the same
+   * Download the company's OWN copy of one output document a run generated — the PLAINTEXT file
+   * bytes. `outputKey` names the output document (the `outputKey` of an entry in the company
+   * participant's `documents`, or the `output_key` of a generate response's `documents` entry).
+   * GETs `/flow-runs/{runId}/documents/{outputKey}/file`, which serves the company-party copy
+   * encrypted to the SERVICE key (unlike {@link documentFile}'s recipient-targeted copy), so the same
    * {@link BinaryHandle} the slot-file download uses decrypts it → the `{"file":"data:…;base64,…"}`
-   * envelope → the file bytes. A 404 (no document generated yet) propagates as a normal {@link ApiError}.
+   * envelope → the file bytes. A 404 propagates as a normal {@link ApiError}: `flows.run_not_found`
+   * for an unknown run, `flows.no_document` when that output was not produced or the company is not
+   * a bound party.
    */
-  async flowRunDocument(runId: string): Promise<Buffer> {
+  async flowRunDocument(runId: string, outputKey: string): Promise<Buffer> {
     return new BinaryHandle({
-      valueUrl: `${BASE}/flow-runs/${runId}/document/file`,
+      valueUrl: `${BASE}/flow-runs/${runId}/documents/${outputKey}/file`,
       fetch: this.binaryFetch,
       decrypt: this.decryptValue,
     }).bytes();
@@ -1443,8 +1447,10 @@ export class Client {
    * Document-mode company leaf: one-time-key value gather → POST /generate.
    *
    * Seals the company's decrypted answers with {@link oneTimeKeyBundle} and POSTs
-   * `{otk, values}`. Resolves to the API response `{document_id, documents, status}`
-   * (idempotent — a repeat answers the same document set).
+   * `{otk, values}`. Resolves to the API response `{documents, status}` — `documents` is one
+   * `{output_key, party_key, document_id, position}` per produced (output document, participant),
+   * `position` the step's 1-based place in the run's signing line or null for an unlisted party
+   * (idempotent — a repeat answers the same set).
    */
   async generateFlowDocument(run: FlowRun): Promise<unknown> {
     const body = oneTimeKeyBundle(this.decryptRunAnswers(run));
@@ -1457,8 +1463,8 @@ export class Client {
    * `fillNode(node, answers) -> {slug: value}` is the company's logic for the
    * current node. The SDK encrypts per party, submits, and — if the submit landed
    * on a document-mode leaf — calls {@link generateFlowDocument}. Resolves to the
-   * latest {@link FlowRun}; when the run is not awaiting the company it is returned
-   * untouched.
+   * latest {@link FlowRun} — after a generate, each participant's produced documents are on its
+   * `documents`; when the run is not awaiting the company it is returned untouched.
    */
   async processFlowRun(
     runId: string,

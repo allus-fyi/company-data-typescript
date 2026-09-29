@@ -106,7 +106,7 @@ const DEF = {
   ],
 };
 
-function runObj(o: { status?: string; current?: string; answers?: unknown[]; definition?: unknown; outputMode?: string; documentId?: string | null } = {}): Record<string, unknown> {
+function runObj(o: { status?: string; current?: string; answers?: unknown[]; definition?: unknown; outputMode?: string; participants?: unknown[] } = {}): Record<string, unknown> {
   const def = { ...(o.definition ?? DEF) } as Record<string, unknown>;
   if (o.outputMode !== undefined) def['output_mode'] = o.outputMode;
   return {
@@ -119,7 +119,7 @@ function runObj(o: { status?: string; current?: string; answers?: unknown[]; def
     bindings: { company: COMPANY_UID, person: PERSON_UID },
     status: o.status ?? 'awaiting_company',
     current_node: o.current ?? 'n1',
-    document_id: o.documentId ?? null,
+    participants: o.participants ?? [],
     output_mode: def['output_mode'],
     definition: def,
     answers: o.answers ?? [],
@@ -278,6 +278,11 @@ test('submitFlowAnswers uses supplied partyPubKeys without fetch', async () => {
   });
 });
 
+const GENERATED = {
+  documents: [{ output_key: 'out_1', party_key: 'company', document_id: 'doc-9', position: 1 }],
+  status: 'awaiting_signature',
+};
+
 // ── generate (document leaf) ──────────────────────────────────────────────────
 
 test('generateFlowDocument posts otk + iv||ct||tag blob', async () => {
@@ -288,12 +293,12 @@ test('generateFlowDocument posts otk + iv||ct||tag blob', async () => {
     const writeRouter: WriteRouter = (method, url, body) => {
       captured.url = url;
       captured.body = body?.json;
-      return new FakeResponse(200, { document_id: 'doc-9', status: 'awaiting_signature' });
+      return new FakeResponse(200, GENERATED);
     };
     const client = makeClientRw(makeConfig(dir), NO_GET, writeRouter);
     const run = FlowRun.fromApi(runObj({ status: 'generating', current: 'n1', answers, outputMode: 'document' }));
     const res = (await client.generateFlowDocument(run)) as any;
-    assert.deepEqual(res, { document_id: 'doc-9', status: 'awaiting_signature' });
+    assert.deepEqual(res, GENERATED);
     assert.ok((captured.url as string).endsWith('/company-data/flow-runs/run-1/generate'));
 
     const otk = Buffer.from(captured.body.otk, 'base64');
@@ -326,8 +331,23 @@ test('processFlowRun company-leaf document chains generate', async () => {
     const router: Router = (url) => {
       if (url.endsWith('/company-data/flow-runs/run-1')) {
         const status = state.posts.length > 0 ? 'awaiting_signature' : 'awaiting_company';
-        const docId = state.posts.length > 0 ? 'doc-9' : null;
-        const r = runObj({ status, current: 'n1', definition: single, outputMode: 'document', documentId: docId });
+        const participants = [
+          {
+            party_key: 'company',
+            person_user_id: COMPANY_UID,
+            connection_id: null,
+            documents:
+              state.posts.length > 0
+                ? [
+                    {
+                      output_key: 'out_1', name: 'Contract', document_id: 'doc-9', document_status: 'ready_to_sign',
+                      requires_signature: true, requires_acceptance: false, position: 1, action: null, acted_at: null,
+                    },
+                  ]
+                : [],
+          },
+        ];
+        const r = runObj({ status, current: 'n1', definition: single, outputMode: 'document', participants });
         return new FakeResponse(200, r);
       }
       if (url.endsWith('/company-data/connections/csc-1')) {
@@ -342,14 +362,15 @@ test('processFlowRun company-leaf document chains generate', async () => {
         return new FakeResponse(200, runObj({ status: 'generating', current: 'n1', definition: single, outputMode: 'document' }));
       }
       assert.ok(url.endsWith('/generate'));
-      return new FakeResponse(200, { document_id: 'doc-9', status: 'awaiting_signature' });
+      return new FakeResponse(200, GENERATED);
     };
     const client = makeClientRw(makeConfig(dir), router, writeRouter);
     const run = await client.processFlowRun('run-1', () => ({ company_name: 'ACME BV' }));
     assert.ok(state.posts.some((u) => u.endsWith('/answers')));
     assert.ok(state.posts.some((u) => u.endsWith('/generate')));
     assert.equal(run.status, 'awaiting_signature');
-    assert.equal(run.documentId, 'doc-9');
+    assert.equal(run.participants[0]!.documents[0]!.documentId, 'doc-9');
+    assert.equal(run.participants[0]!.documents[0]!.outputKey, 'out_1');
   });
 });
 

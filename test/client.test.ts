@@ -375,13 +375,13 @@ test('binary handle parses the encrypted shape as XML for an xml-format client',
       `<value><_enc>1</_enc><k>${w.k}</k><iv>${w.iv}</iv><d>${w.d}</d></value>` +
       '</response>';
     const { client } = makeClient(config, (url) => {
-      if (url.endsWith('/flow-runs/run-1/document/file')) {
+      if (url.endsWith('/flow-runs/run-1/documents/out_1/file')) {
         return new FakeResponse(200, undefined, xml, { 'Content-Type': 'application/xml' });
       }
       throw new Error('unexpected GET ' + url);
     });
 
-    const data = await client.flowRunDocument('run-1');
+    const data = await client.flowRunDocument('run-1', 'out_1');
     assert.equal(createHash('sha256').update(data).digest('hex'), vector.binary.inner_full_sha256);
   });
 });

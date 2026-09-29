@@ -16,7 +16,7 @@ import { FlowHandler } from './handlers/flow.js';
 import { CompanyDataHandler } from './handlers/companyData.js';
 
 /**
- * The ONE example-test-suite server (demo-backend contract v3). A single class, a single worker (Node's
+ * The ONE example-test-suite server (demo-backend contract v4). A single class, a single worker (Node's
  * built-in http): HTTP dispatch → the scenario's FAMILY handler → the SDK's intended top-level surface.
  * It serves the static bundle + the whole contract API + the identity OAuth `/callback` + the public
  * company-data `POST /webhook`, all on ONE port.
@@ -30,7 +30,7 @@ import { CompanyDataHandler } from './handlers/companyData.js';
  * live in ONE `.runtime/` without colliding (config/run/meta files are keyed by the public scenario id).
  */
 
-export const CONTRACT_VERSION = 3;
+export const CONTRACT_VERSION = 4;
 export const SDK = 'typescript';
 
 export class Server {

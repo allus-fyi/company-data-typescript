@@ -55,10 +55,10 @@ const CALL_TRIGGER =
   "Client.triggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version";
 const CALL_FLOW_RUN = 'Client.flowRun — re-read on every poll to see whose turn the run is on';
 const CALL_PROCESS =
-  'Client.processFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf';
+  'Client.processFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the output documents when the submit lands on a document-mode leaf';
 const CALL_ANSWERS = "Client.flowRunAnswers — the completed run's answers, decrypted with the service key";
 const CALL_DOCUMENT =
-  "Client.flowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key";
+  "Client.flowRunDocument — downloads the company's own copy of output document {output_key} and decrypts it with the service key";
 
 
 export class FlowHandler {
@@ -237,7 +237,7 @@ export class FlowHandler {
   /**
    * The idempotent, short-cycled poll that IS the drive loop and the resume. Reads the platform run;
    * if it is the company's turn drives exactly ONE step; on completion fetches the answers and
-   * (document-mode) downloads the generated contract. A terminal run returns its cached result on every
+   * (document-mode) downloads every generated output document. A terminal run returns its cached result on every
    * poll until TTL/Clear.
    */
   async runRespond(runId: string, run: RunRecord, _host: string, res: ServerResponse): Promise<void> {
@@ -366,8 +366,9 @@ export class FlowHandler {
   }
 
   /**
-   * Terminal: fetch the decrypted answers and, for a document-mode run, download the generated
-   * contract's company copy (flowRunDocument — the run-scoped, service-key-decryptable surface).
+   * Terminal: fetch the decrypted answers and, for a document-mode run, download the company's copy
+   * of EVERY output document the run produced (flowRunDocument — the run-scoped,
+   * service-key-decryptable surface).
    */
   private async complete(
     run: RunRecord,
@@ -381,15 +382,19 @@ export class FlowHandler {
     run.answers = Object.entries(answers).map(([slug, value]) => ({ slug, value, cipher: ciphers[slug] ?? null }));
 
     if (flowRun.outputMode === 'document') {
-      try {
-        run.calls = addCall(run.calls, CALL_DOCUMENT);
-        const bytes = await client.flowRunDocument(flowRunId);
-        run.document = { status: 'downloaded', downloaded: true, bytes: bytes.length };
-      } catch (e) {
-        if (!(e instanceof ApiError)) throw e;
-        // The run completed but the document is not retrievable yet — report it, don't fail.
-        run.document = { status: 'unavailable', downloaded: false, error: e.message };
+      const documents: Record<string, unknown>[] = [];
+      for (const outputKey of companyOutputKeys(flowRun)) {
+        try {
+          run.calls = addCall(run.calls, CALL_DOCUMENT.replace('{output_key}', outputKey));
+          const bytes = await client.flowRunDocument(flowRunId, outputKey);
+          documents.push({ output_key: outputKey, status: 'downloaded', downloaded: true, bytes: bytes.length });
+        } catch (e) {
+          if (!(e instanceof ApiError)) throw e;
+          // The run completed but this output is not retrievable — report it, don't fail.
+          documents.push({ output_key: outputKey, status: 'unavailable', downloaded: false, error: e.message });
+        }
       }
+      run.documents = documents;
     }
 
     run.status = 'completed';
@@ -400,7 +405,7 @@ export class FlowHandler {
   /**
    * The GET /api/runs/{runId} response: the SHARED run envelope (outer
    * {status:"pending"|"done"|"failed", result?, error?, calls}) with the pinned FLOW shape nested under
-   * `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, document?}). Progress is
+   * `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, documents?}). Progress is
    * meant to be read ONLY from `run.result`, with polling continuing ONLY while the outer status is
    * "pending", so the inner flow status must NOT sit at the top level — it drives under "pending" until
    * the platform run completes ("done") or errors ("failed").
@@ -414,7 +419,7 @@ export class FlowHandler {
       steps: (run.steps as unknown[]) ?? [],
     };
     if (run.answers !== undefined) result.answers = run.answers;
-    if (run.document !== undefined) result.document = run.document;
+    if (run.documents !== undefined) result.documents = run.documents;
 
     const out: Record<string, unknown> = { status: outer, result, calls: run.calls ?? [] };
     if (run.error !== undefined) out.error = run.error;
@@ -473,6 +478,22 @@ async function resolveConnection(client: Client, shareCode: string): Promise<Con
  * returned — the evidence the "Decrypted answers" panel pairs against each cleartext value, so a
  * reader can see the decrypt actually ran on real ciphertext rather than take it on faith.
  */
+/**
+ * The output keys of the documents the run produced for the company, in signing-line order, each once
+ * — read off every participant row bound to the company's own user id (a company can hold more than one
+ * party of a run, and each such row carries a copy of every output).
+ */
+function companyOutputKeys(flowRun: FlowRun): string[] {
+  const keys: string[] = [];
+  for (const participant of flowRun.participants) {
+    if (participant.personUserId !== flowRun.companyUserId) continue;
+    for (const doc of participant.documents) {
+      if (doc.outputKey !== null && doc.outputKey !== '' && !keys.includes(doc.outputKey)) keys.push(doc.outputKey);
+    }
+  }
+  return keys;
+}
+
 function ownCipherBySlug(flowRun: FlowRun): Record<string, unknown> {
   const serviceUid = flowRun.serviceUserId;
   const out: Record<string, unknown> = {};

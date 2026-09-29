@@ -742,9 +742,10 @@ export class Document {
      */
     readonly signatures: Json[],
     /**
-     * Present only on a contract-flow run-participant document: the run's ordered signature
-     * summary, one entry per participant owing an act — each
-     * `{party_key, document_id, position, status, action, acted_at}`. Null on any other document.
+     * Present only on a contract-flow run-participant document: the WHOLE run's signing line,
+     * one entry per (output document, participant) in line order — each
+     * `{output_key, name, party_key, document_id, position, status, action, acted_at}`. Every
+     * document of the run carries the same summary. Null on any other document.
      */
     readonly runSignatures: Json[] | null,
     private readonly decryptValue: DecryptWrapper | null,
@@ -852,32 +853,29 @@ export class LogEntry {
  */
 
 /**
- * One participant's row on a run's `participants[]` (flows.html §5a/§9 item 12) — the durable
- * participant set, additively carrying its place in the leaf PDF rule's ordered signing plan.
- * One account may hold TWO of these (two owner parties, or one customer bound to two party
- * keys) — never collapse this to a single row by user id.
+ * One of a participant's own documents on a run — one per output document the leaf produced for
+ * that participant. `position` is the step's 1-based place in the run's ONE signing line; null
+ * for a party the output's signer list does not name (its copy is `active` from the start, owing
+ * nothing).
  */
-export class FlowRunParticipant {
+export class FlowRunParticipantDocument {
   constructor(
-    readonly partyKey: string | null,
-    readonly personUserId: string | null,
-    readonly connectionId: string | null,
+    readonly outputKey: string | null,
+    readonly name: string | null,
     readonly documentId: string | null,
     readonly documentStatus: string | null,
     readonly requiresSignature: boolean,
     readonly requiresAcceptance: boolean,
-    /** 1-based place in the signing plan; null for a party the plan does not name. */
     readonly position: number | null,
-    /** 'signed' | 'accepted' | null — null until this participant's document has acted. */
+    /** 'signed' | 'accepted' | null — null until this document has been acted on. */
     readonly action: string | null,
     readonly actedAt: string | null,
   ) {}
 
-  static fromApi(o: Json): FlowRunParticipant {
-    return new FlowRunParticipant(
-      o['party_key'] != null ? String(o['party_key']) : null,
-      o['person_user_id'] != null ? String(o['person_user_id']) : null,
-      o['connection_id'] != null ? String(o['connection_id']) : null,
+  static fromApi(o: Json): FlowRunParticipantDocument {
+    return new FlowRunParticipantDocument(
+      o['output_key'] != null ? String(o['output_key']) : null,
+      o['name'] != null ? String(o['name']) : null,
       o['document_id'] != null ? String(o['document_id']) : null,
       o['document_status'] != null ? String(o['document_status']) : null,
       Boolean(coerceBool(o['requires_signature'])),
@@ -885,6 +883,36 @@ export class FlowRunParticipant {
       o['position'] != null ? Number(o['position']) : null,
       o['action'] != null ? String(o['action']) : null,
       o['acted_at'] != null ? String(o['acted_at']) : null,
+    );
+  }
+}
+
+/**
+ * One participant's row on a run's `participants[]` — the durable participant set. `documents`
+ * holds the participant's own copy of every output document the run produced, ordered by
+ * signing-line position (unlisted last); empty before generation. One account may hold TWO of
+ * these (two owner parties, or one customer bound to two party keys) — never collapse this to a
+ * single row by user id.
+ */
+export class FlowRunParticipant {
+  constructor(
+    readonly partyKey: string | null,
+    readonly personUserId: string | null,
+    readonly connectionId: string | null,
+    readonly documents: FlowRunParticipantDocument[],
+  ) {}
+
+  static fromApi(o: Json): FlowRunParticipant {
+    const docsRaw = o['documents'];
+    return new FlowRunParticipant(
+      o['party_key'] != null ? String(o['party_key']) : null,
+      o['person_user_id'] != null ? String(o['person_user_id']) : null,
+      o['connection_id'] != null ? String(o['connection_id']) : null,
+      Array.isArray(docsRaw)
+        ? docsRaw
+            .filter((d): d is Json => d !== null && typeof d === 'object' && !Array.isArray(d))
+            .map((d) => FlowRunParticipantDocument.fromApi(d))
+        : [],
     );
   }
 }
@@ -900,7 +928,6 @@ export class FlowRun {
     readonly bindings: Record<string, string>,
     readonly status: string | null,
     readonly currentNode: string | null,
-    readonly documentId: string | null,
     readonly outputMode: string | null,
     readonly definition: Json,
     readonly answers: Json[],
@@ -983,7 +1010,6 @@ export class FlowRun {
       bindings,
       o['status'] != null ? String(o['status']) : null,
       o['current_node'] != null ? String(o['current_node']) : null,
-      o['document_id'] != null ? String(o['document_id']) : null,
       outputMode,
       definition,
       answers,

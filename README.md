@@ -902,19 +902,29 @@ additionally carries `plain_sha256`, `signer_first_name`, `signer_last_name` and
 
 * `listDocuments(opts)` filters optionally by `personUserId` and/or `status` and pages with `limit`/`offset`.
 * `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).
-* A contract-flow-generated document can also read `waiting` — a run-participant copy whose signer has not been reached yet in the run's ordered signing plan. It is read-only: `updateDocumentStatus` throws (`error_key: 'documents.run_managed'`, 409) if you try to write `status` on a run-participant document while it is `waiting`, `ready_to_sign` or `offering` — that status moves only through flow generation, the run's own advance, sign/accept, or a run cancel/decline. Such a document's `runSignatures` carries the run's ordered signature summary.
-* `documentFile(id)` (#491) downloads a `'file'` document's BYTES — the metadata methods don't include them. A **broadcast** (plaintext) document's bytes are returned as-is; a **per-person / private** document is encrypted to the *recipient's* key (not your service key), so `documentFile` fails clearly with `documents.recipient_encrypted` (`ApiError`) rather than a doomed decrypt. For a generated flow contract's own copy use `flowRunDocument(runId)` below (that copy IS service-key-encrypted).
+* A contract-flow-generated document can also read `waiting` — a run-participant copy whose signer has not been reached yet in the run's signing line. It is read-only: `updateDocumentStatus` throws (`error_key: 'documents.run_managed'`, 409) if you try to write `status` on a run-participant document while it is `waiting`, `ready_to_sign` or `offering` — that status moves only through flow generation, the run's own advance, sign/accept, or a run cancel/decline. Such a document's `runSignatures` carries the WHOLE run's signing line — one entry per (output document, participant), in line order, each `{output_key, name, party_key, document_id, position, status, action, acted_at}`; every document of the run carries the same summary.
+* `documentFile(id)` downloads a `'file'` document's BYTES — the metadata methods don't include them. A **broadcast** (plaintext) document's bytes are returned as-is; a **per-person / private** document is encrypted to the *recipient's* key (not your service key), so `documentFile` fails clearly with `documents.recipient_encrypted` (`ApiError`) rather than a doomed decrypt. For a generated flow document's own copy use `flowRunDocument(runId, outputKey)` below (that copy IS service-key-encrypted).
 
 ### Contract flows & identity (#491)
 
 ```ts
 flowRunAnswers(run: FlowRun | string): Promise<Record<string, unknown>>  // gap 1 — a completed run's DECRYPTED answers {slug: plaintext}
-flowRunDocument(runId): Promise<Buffer>                                  // gap 2 — the company's own copy of a run's generated contract (plaintext bytes)
+flowRunDocument(runId, outputKey): Promise<Buffer>                       // the company's own copy of one generated output document (plaintext bytes)
 identity(): Promise<{ company_user_id: string; service_id: string }>     // gap 3 — this client's own identity
 ```
 
 * `flowRunAnswers(run)` returns a completed run's decrypted `{slug: plaintext}` answers (accepts a fetched `FlowRun` or a run id). It is the public accessor for a finished run's answers, which `processFlowRun` returns untouched.
-* `flowRunDocument(runId)` downloads the company's own service-key-encrypted copy of a run's generated contract and returns the plaintext file bytes (a 404 `ApiError` until the run generates a document) — the honest completion step (fill → complete → `flowRunAnswers` → `flowRunDocument`).
+* A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum"). `generateFlowDocument(run)` resolves to `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), `null` for a party an output's signer list does not name. A repeat answers the same set.
+* A `FlowRun`'s `participants` are `FlowRunParticipant { partyKey, personUserId, connectionId, documents }`; `documents` is that participant's own copy of each output document — `FlowRunParticipantDocument { outputKey, name, documentId, documentStatus, requiresSignature, requiresAcceptance, position, action, actedAt }`, ordered by line position.
+* `flowRunDocument(runId, outputKey)` downloads the company's own service-key-encrypted copy of one output document and returns the plaintext file bytes — the honest completion step (fill → complete → `flowRunAnswers` → `flowRunDocument` per output). A 404 `ApiError` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party.
+
+```ts
+const run = await client.flowRun(runId);
+const own = run.participants.find((p) => p.partyKey === run.companyPartyKey);
+for (const doc of own?.documents ?? []) {
+  const pdf = await client.flowRunDocument(run.id, doc.outputKey!);
+}
+```
 * `identity()` returns this client's `{ company_user_id, service_id }` from `GET /api/company-data/whoami`, so a `triggerFlowRun` binding's **company** party can bind to `company_user_id` (the person party's user_id comes from the connection).
 
 **The party that answers a run's last step generates the contract — the customer role included.**
@@ -927,8 +937,9 @@ customer.generateFlowDocument(connectionId, run): Promise<unknown>   // POST /ap
 
 Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
 answers, decrypted with the account key — every party's answers are sealed to every bound party, so
-that copy holds the whole run and no service key is involved. Resolves to `{document_id, documents,
-status}`; a repeat answers the same document set. Throws `ConfigError` when the run's current step is
+that copy holds the whole run and no service key is involved. Resolves to `{documents, status}` —
+one `{output_key, party_key, document_id, position}` per produced (output document, participant); a
+repeat answers the same set. Throws `ConfigError` when the run's current step is
 not bound to your company.
 
 ### Plugin fields on a flow step

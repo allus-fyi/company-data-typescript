@@ -356,8 +356,9 @@ export class CustomerClient {
    * `generating`; pass the run as re-read then. The whole answer map comes from this company's OWN
    * copy of the answers, decrypted with the account key — every party's answers are sealed to every
    * bound party, so that copy holds the whole run and no service key is involved — and is sealed with
-   * {@link oneTimeKeyBundle}. Resolves to the API response `{document_id, documents, status}`
-   * (idempotent — a repeat answers the same document set).
+   * {@link oneTimeKeyBundle}. Resolves to the API response `{documents, status}` — `documents` is
+   * one `{output_key, party_key, document_id, position}` per produced (output document, participant)
+   * (idempotent — a repeat answers the same set).
    *
    * @throws ConfigError when the run's current step is not bound to this company — the participant
    *   the run lists on `connectionId`.

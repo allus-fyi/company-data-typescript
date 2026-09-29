@@ -100,6 +100,7 @@ export {
   Document,
   FlowRun,
   FlowRunParticipant,
+  FlowRunParticipantDocument,
   LogEntry,
   PluginValue,
   RequestFieldPlugin,

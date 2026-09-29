@@ -7,11 +7,11 @@ A runnable demo of **everything the SDK does**, across three scenario families:
   (a guide card), and standalone **service-2FA** with enrollment.
 - **Flow** — run a **contract flow** end-to-end: trigger it, drive the company party through it with
   type-checked step filling, hand a turn to the person's phone, then read the decrypted answers and
-  (for the contract fixture) download the generated signed document.
+  (for the contract fixture) download every generated output document.
 - **Company-data** — connections read, request-field catalog, the change feed, **webhooks**, and
   creating document/contract types (six offered, pick which to create).
 
-It is a thin backend implementing the shared **demo-backend contract (v3)**; most of the UI is the
+It is a thin backend implementing the shared **demo-backend contract (v4)**; most of the UI is the
 shared frontend bundle fetched from
 [`allme-sdk/example-test-suite`](https://github.com/allme-sdk/example-test-suite). The point is
 teaching: each scenario's handler calls the SDK's intended top-level surface, so a reader opens a
@@ -129,12 +129,18 @@ bundle server) — not the SDK example.
 | **Trigger** (`/start`) | `Client.fromConfig` → `requestFields()` (resolve flow name + version → flow id) → `identity()` (company party) → `connections()` (resolve share code → person party) → `triggerFlowRun(flowId, {connectionId, bindings})` |
 | **Drive** (`/api/runs` poll, company turn) | `flowRun()` → `processFlowRun(flowRunId, fillNode)` — the `email` field is filled invalid once (`ValidationError` → ✗), then valid (→ ✓) |
 | **Wait** (person's turn) | `flowRun()` reports `awaiting_<person party>` → the run sits in `waiting_person`; the next poll resumes automatically |
-| **Complete** (run `completed`) | `flowRunAnswers()` (decrypted `{slug: value}`), plus `flowRunDocument()` for the `document` fixture |
+| **Complete** (run `completed`) | `flowRunAnswers()` (decrypted `{slug: value}`), plus `flowRunDocument(flowRunId, outputKey)` for each output document in the company participant's `documents` (the `document` fixture) |
 
 The flow ships **two importable fixtures** in `fixtures/` — `info-gathering.zip` (`data_only`: a few
 company steps incl. an email validation-demo step, then a person turn) and `contract.zip` (`document`:
 a company step then a signature leaf that generates a document). Import the one you pick into the
 portal (service settings → Flows → Import) and publish it.
+
+A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum").
+Generation answers `{documents: [{output_key, party_key, document_id, position}], status}` — one entry
+per produced (output document, participant). On completion the handler downloads the company's own
+copy of EACH output with `flowRunDocument(flowRunId, outputKey)` and reports them as
+`documents: [{output_key, status, downloaded}]`.
 
 ### Company-data — what each scenario calls
 
@@ -172,11 +178,11 @@ run and collects events two ways:
    webhook at it. `verifyWebhook()` false → **401**; a verified delivery is parsed and appended → **200**
    (a verified-but-unparseable one is acknowledged **200** and counted in `unparseable`).
 
-## How it works (contract v3)
+## How it works (contract v4)
 
 - **One server, one port, all three families.** A single Node `http` process serves the static bundle,
   the whole contract API, the identity OAuth `/callback`, and the public company-data `POST /webhook`.
-  `GET /api/meta` lists all 13 scenarios (7 identity + 1 flow + 5 company-data) at `contractVersion 3`.
+  `GET /api/meta` lists all 13 scenarios (7 identity + 1 flow + 5 company-data) at `contractVersion 4`.
   A scenario request is dispatched to its family by id (integers → identity, `flow:*` → flow,
   `companydata:*` → company-data).
 - **Config-file model.** `POST /api/scenarios/{id}/config` writes the browser's settings to a canonical
@@ -202,7 +208,7 @@ run and collects events two ways:
 examples/
 ├── package.json          # one manifest (the SDK via file:.., openid-client); npm start
 ├── tsconfig.json         # one strict tsconfig (tsc --noEmit typechecks the whole example)
-├── frontend.lock         # ONE pinned {tag, sha256} of the shared frontend bundle (contract v3)
+├── frontend.lock         # ONE pinned {tag, sha256} of the shared frontend bundle (contract v4)
 ├── fixtures/             # the two importable flow packages (portal-export zips)
 ├── bin/start.ts          # launcher (wipe → fetch+verify bundle → contract guard → serve)
 └── src/
@@ -232,7 +238,7 @@ checks the bundle's `contract.json` version against the backend (a mismatch refu
 | Symptom | Fix |
 |---|---|
 | **`port 8091 is busy`** at startup | Another example holds the port — one origin is shared across SDK examples, so only one runs at a time. Stop it, or `PORT=<n> npm start`. |
-| **`contract mismatch: bundle contractVersion=… backend implements …`** | The pinned bundle's `contract.json` version differs from this backend (v3). Bump `frontend.lock` to a matching release (and re-fetch), or update the backend. |
+| **`contract mismatch: bundle contractVersion=… backend implements …`** | The pinned bundle's `contract.json` version differs from this backend (v4). Bump `frontend.lock` to a matching release (and re-fetch), or update the backend. |
 | **`frontend checksum MISMATCH`** | The downloaded `dist.tar.gz` doesn't match `frontend.lock`'s `sha256`. Fix the `sha256` (from `shasum -a 256 dist.tar.gz` on the real release) or re-download. |
 | **`could not download the pinned frontend release`** | The release isn't published yet, or no network. If unpublished, seed the bundle into `.frontend/<tag>/` manually (build `example-test-suite`, `tar -xzf dist.tar.gz -C .frontend/<tag>`, `printf %s <sha> > .frontend/<tag>/.sha`). |
 | **Cannot find module `@allus-fyi/company-data`** | Build the SDK first (`npm run build` in the SDK repo root) — the example imports it through `dist/`. |

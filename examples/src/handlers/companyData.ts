@@ -7,7 +7,7 @@ import { TimeoutTransport } from '../timeoutTransport.js';
 import { headerValue, readRawBody, sendJson, sendText, str } from '../http.js';
 
 /**
- * The COMPANY-DATA scenario family (contract v3). Every scenario runs the SERVICE-role data {@link Client}
+ * The COMPANY-DATA scenario family (contract v4). Every scenario runs the SERVICE-role data {@link Client}
  * built from the persisted config file — there is NO OAuth/OIDC leg (no /callback, no /enroll). Each
  * handler reaches the SDK's intended top-level surface only; the scaffolding lives in src/.
  *
