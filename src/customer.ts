@@ -16,7 +16,8 @@
 import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
-import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, oneTimeKeyBundle, type EncWrapper } from './crypto.js';
+import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
+import { fileRef, generateWithInputs, heldSources, type HeldSource } from './flowSources.js';
 import { ConfigError, ValidationError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
@@ -356,9 +357,13 @@ export class CustomerClient {
    * `generating`; pass the run as re-read then. The whole answer map comes from this company's OWN
    * copy of the answers, decrypted with the account key — every party's answers are sealed to every
    * bound party, so that copy holds the whole run and no service key is involved — and is sealed with
-   * {@link oneTimeKeyBundle}. Resolves to the API response `{documents, status}` — `documents` is
-   * one `{output_key, party_key, document_id, position}` per produced (output document, participant)
-   * (idempotent — a repeat answers the same set).
+   * `oneTimeKeyBundle`. Every participant PDF source the leaf's rules name that the run holds
+   * for this company (a `source_field` whose own answer is a file, a `source_connection` in
+   * `run.sourceFiles`) is first fetched through `answer-files`, decrypted with the account key,
+   * sealed under the same one-time key and uploaded to `/generate/inputs`. Resolves to the API
+   * response `{documents, status}` — `documents` is one `{output_key, party_key, document_id,
+   * position}` per produced (output document, participant) (idempotent — a repeat answers the same
+   * set).
    *
    * @throws ConfigError when the run's current step is not bound to this company — the participant
    *   the run lists on `connectionId`.
@@ -371,9 +376,21 @@ export class CustomerClient {
     if (ownUid === null || ![...step.ownPartyKeys].some((key) => run.bindings[key] === ownUid)) {
       throw new ConfigError(`run ${run.id} is not at a step this company answered`);
     }
-    return this.http.post(`${CONN}/${connectionId}/flow-runs/${run.id}/generate`, {
-      json: oneTimeKeyBundle(this.flowPartyView(run).stored),
-    });
+    const base = `${CONN}/${connectionId}/flow-runs/${run.id}`;
+    // This company's own copy of a held source — its own answer file, or its own copy of a
+    // connection source made at run start — both served by the answer-files route.
+    const envelopeOf = async (src: HeldSource): Promise<string> => {
+      const resp = await this.http.getResponse(`${base}/answer-files/${encodeURIComponent(src.file)}`);
+      const contentType = (resp.header('Content-Type') ?? '').toLowerCase();
+      return this.decryptAccount(this.http.parseBody(resp, contentType.includes('xml')) as EncWrapper | string);
+    };
+    return generateWithInputs(
+      (path, body) => this.http.post(path, { json: body }),
+      `${base}/generate`,
+      this.flowPartyView(run).stored,
+      heldSources(run.definition, run.currentNode, run.answers, ownUid, run.sourceFiles),
+      envelopeOf,
+    );
   }
 
   /**
@@ -474,7 +491,11 @@ export class CustomerClient {
         const slug = row['slug'];
         const v = row['value'];
         if (typeof slug !== 'string' || v == null) continue;
-        stored[slug] = this.decryptAccount(v as EncWrapper | string);
+        // A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands in the
+        // map as that reference, which reads as answered.
+        stored[slug] = fileRef(v) !== null
+          ? (typeof v === 'string' ? v : JSON.stringify(v))
+          : this.decryptAccount(v as EncWrapper | string);
       }
     }
     return {

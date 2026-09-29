@@ -927,6 +927,50 @@ for (const doc of own?.documents ?? []) {
 ```
 * `identity()` returns this client's `{ company_user_id, service_id }` from `GET /api/company-data/whoami`, so a `triggerFlowRun` binding's **company** party can bind to `company_user_id` (the person party's user_id comes from the connection).
 
+### Participant PDF sources, company-turn uploads and generation inputs
+
+A leaf output rule's PDF is a company template (`asset_key`), a flow field's answer
+(`source_field: "<slug>"` → source key `field:<slug>`, a field of type `pdf_document` or a descendant),
+or what a bound customer shared on its connection for a `pdf_document` request field
+(`source_connection: {party, request_slug}` → `conn:<party>:<request_slug>`). A rule whose source the
+run does not hold does not match; the next rule is tried.
+
+```ts
+triggerFlowRun(flowId, { connectionId, bindings, sourceFiles? }): Promise<FlowRun>  // sourceFiles: [{source_key, for_user_id, file}]
+stageRunFile(flowId, sealedValue): Promise<string>                      // POST /flows/{flowId}/run-files {value} → file
+uploadAnswerFile(runId, slug, forUserId, sealedValue): Promise<string>  // POST /flow-runs/{runId}/answer-files {slug, for_user_id, value} → file
+flowRunSourceFile(runId, sourceKey): Promise<EncWrapper | string | null | undefined>  // GET /flow-runs/{runId}/source-files/{sourceKey} — the stored wrapper
+```
+
+* **Connection sources are copied at run start.** For each answered `conn:` source a rule of the
+  flow's latest published version names, seal the source's envelope JSON once per distinct bound user
+  (your own copy to the service key, a person's to their public key, a company customer's to its
+  account key), stage each with `stageRunFile`, and pass the files as `sourceFiles`. A start whose list
+  is not exactly that set is refused with `ApiError` `flows.source_files_invalid`; its `details` carry
+  `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing is written. The
+  copy is a snapshot: a later change on the connection does not reach the run.
+* `sealedValue` is a `{"_enc":1,…}` wrapper (as returned by `encryptForPublicKey`) or its JSON string.
+  Staged copies and generation inputs share one size budget; an over-budget one is refused
+  `documents.too_large`.
+* **A company turn can answer a binary field.** `uploadAnswerFile` stores one bound party's copy (the
+  file's envelope JSON sealed to that party); upload one per bound party and submit
+  `{"_enc_file": file}` as each party's answer value. An over-cap upload is refused
+  `flows.answer_file_too_large`.
+* `FlowRun.sourceFiles` is `{source_key: file}` — the run's connection-source copies held for YOUR
+  company (`{}` when none). `flowRunSourceFile(runId, sourceKey)` reads your copy (URL-encodes the key).
+* A file answer (`{"_enc_file": file}`, with `"_link": 1` on a frozen copy of a linked profile file)
+  is a plaintext reference, not a wrapper; the decrypted answer map carries it as that reference,
+  which reads as answered.
+* **Generation uploads the held source PDFs first.** `generateFlowDocument` (and therefore
+  `processFlowRun` at a document leaf, and `CustomerClient.generateFlowDocument`) computes the held set
+  of the current leaf's rules — a `source_field` whose own answer is a file, a `source_connection` in
+  `run.sourceFiles` — fetches each own copy (`slots/{slug}/file` resp. `source-files/{key}`; the
+  customer role through its `answer-files` route), decrypts it, seals it under the same one-time key
+  as `values` and uploads it to `…/generate/inputs`, then generates with
+  `{otk, values, inputs: [{source_key, input}]}` (`inputs: []` when nothing is held). Refusals:
+  `flows.generate_inputs_mismatch` (the inputs are not the held set) and `flows.source_pdf_invalid`
+  (a source is not a usable PDF; the run stays `generating`).
+
 **The party that answers a run's last step generates the contract — the customer role included.**
 When your company is a CUSTOMER of another company's service and its answer completes a document-mode
 leaf, the run parks at `generating` until you generate:
@@ -937,7 +981,8 @@ customer.generateFlowDocument(connectionId, run): Promise<unknown>   // POST /ap
 
 Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
 answers, decrypted with the account key — every party's answers are sealed to every bound party, so
-that copy holds the whole run and no service key is involved. Resolves to `{documents, status}` —
+that copy holds the whole run and no service key is involved. Every held participant PDF source is
+uploaded as a generation input first (above). Resolves to `{documents, status}` —
 one `{output_key, party_key, document_id, position}` per produced (output document, participant); a
 repeat answers the same set. Throws `ConfigError` when the run's current step is
 not bound to your company.

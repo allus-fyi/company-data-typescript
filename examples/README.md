@@ -142,6 +142,12 @@ per produced (output document, participant). On completion the handler downloads
 copy of EACH output with `flowRunDocument(flowRunId, outputKey)` and reports them as
 `documents: [{output_key, status, downloaded}]`.
 
+When a leaf rule takes its PDF from a participant (a `pdf_document` flow field, or a `pdf_document`
+request field a customer shared on its connection), `processFlowRun` uploads the company's own copy of
+every held source as a generation input before it generates — the handler needs no extra call. A flow
+with a connection source also needs its staged copies passed to `triggerFlowRun` as `sourceFiles`
+(`stageRunFile`); the scenario's fixtures use template rules only.
+
 ### Company-data — what each scenario calls
 
 | Scenario | SDK call(s) | Result |

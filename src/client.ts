@@ -56,13 +56,13 @@ import {
   encryptForPublicKey,
   loadPrivateKey,
   loadPublicKey,
-  oneTimeKeyBundle,
   type BinaryFetchResult,
   type EncWrapper,
 } from './crypto.js';
 import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError, WebhookError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { computeConstants, evaluateCondition, expandPluginAnswers } from './flowCondition.js';
+import { fileRef, generateWithInputs, heldSources, type HeldSource } from './flowSources.js';
 import {
   PluginPass,
   PluginOptions,
@@ -1144,14 +1144,79 @@ export class Client {
    * PUBLISHED version. `connectionId` is the person-side
    * `company_service_connections.id` for this service. Resolves to the created
    * {@link FlowRun} (status `awaiting_<entry node's party>`).
+   *
+   * `sourceFiles` = `[{source_key, for_user_id, file}]`: one staged copy ({@link stageRunFile}) per
+   * answered connection source (`conn:<party>:<request_slug>`) a rule of the pinned version names,
+   * per distinct bound user — the company's own copy sealed to the service key. A start whose list is
+   * not exactly that set is refused with {@link ApiError} `flows.source_files_invalid`, whose
+   * `details` carry `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`); nothing
+   * is written.
    */
   async triggerFlowRun(
     flowId: string,
-    opts: { connectionId: string; bindings: Record<string, string> },
+    opts: {
+      connectionId: string;
+      bindings: Record<string, string>;
+      sourceFiles?: { source_key: string; for_user_id: string; file: string }[];
+    },
   ): Promise<FlowRun> {
-    const body = { target: { connection_id: opts.connectionId }, bindings: opts.bindings };
+    const body: Json = { target: { connection_id: opts.connectionId }, bindings: opts.bindings };
+    if (opts.sourceFiles && opts.sourceFiles.length > 0) {
+      body['source_files'] = opts.sourceFiles.map((s) => ({
+        source_key: s.source_key,
+        for_user_id: s.for_user_id,
+        file: s.file,
+      }));
+    }
     const created = await this.http.post(`${FLOWS}/${flowId}/runs`, { json: body });
     return FlowRun.fromApi(asJson(created));
+  }
+
+  /**
+   * Stage one sealed copy of a connection source for a run start → its `file`.
+   *
+   * `POST /api/company-data/flows/{flowId}/run-files` with `{value}`: `sealedValue` is the source's
+   * envelope JSON sealed to ONE bound user (a `{"_enc":1,…}` wrapper, as an object or its JSON
+   * string). Name the returned file in {@link triggerFlowRun}'s `sourceFiles`. An over-budget value
+   * is refused `documents.too_large`.
+   */
+  async stageRunFile(flowId: string, sealedValue: EncWrapper | string): Promise<string> {
+    const body = await this.http.post(`${FLOWS}/${flowId}/run-files`, {
+      json: { value: sealedString(sealedValue) },
+    });
+    return responseFile(body);
+  }
+
+  /**
+   * Upload one bound party's copy of a binary answer on the company's turn → its `file`.
+   *
+   * `POST /api/company-data/flow-runs/{runId}/answer-files` with `{slug, for_user_id, value}`:
+   * `slug` a binary field of the current step, `forUserId` a bound party, `sealedValue` the file's
+   * envelope JSON sealed to that party's key (a wrapper object or its JSON string). Upload one copy
+   * per bound party, then submit `{"_enc_file": file}` as each party's answer value.
+   */
+  async uploadAnswerFile(
+    runId: string,
+    slug: string,
+    forUserId: string,
+    sealedValue: EncWrapper | string,
+  ): Promise<string> {
+    const body = await this.http.post(`${FLOW_RUNS}/${runId}/answer-files`, {
+      json: { slug, for_user_id: forUserId, value: sealedString(sealedValue) },
+    });
+    return responseFile(body);
+  }
+
+  /**
+   * The company's own copy of a run's connection source, as stored — the sealed wrapper.
+   *
+   * `GET /api/company-data/flow-runs/{runId}/source-files/{sourceKey}` (the key, e.g.
+   * `conn:customer:passport`, is URL-encoded). The wrapper opens with the service key; its
+   * plaintext is the file's envelope JSON. `FlowRun.sourceFiles` lists the run's keys.
+   */
+  async flowRunSourceFile(runId: string, sourceKey: string): Promise<EncWrapper | string | null | undefined> {
+    const res = await this.binaryFetch(`${FLOW_RUNS}/${runId}/source-files/${encodeURIComponent(sourceKey)}`);
+    return res.wrapper;
   }
 
   /**
@@ -1241,6 +1306,12 @@ export class Client {
       const slug = row['slug'];
       const v = row['value'];
       if (typeof slug !== 'string' || v == null) continue;
+      // A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands in the
+      // map as that reference, which reads as answered.
+      if (fileRef(v) !== null) {
+        out[slug] = typeof v === 'string' ? v : JSON.stringify(v);
+        continue;
+      }
       out[slug] = cryptoDecrypt(v as EncWrapper | string, this.privateKey);
     }
     return out;
@@ -1446,15 +1517,38 @@ export class Client {
   /**
    * Document-mode company leaf: one-time-key value gather → POST /generate.
    *
-   * Seals the company's decrypted answers with {@link oneTimeKeyBundle} and POSTs
-   * `{otk, values}`. Resolves to the API response `{documents, status}` — `documents` is one
-   * `{output_key, party_key, document_id, position}` per produced (output document, participant),
-   * `position` the step's 1-based place in the run's signing line or null for an unlisted party
-   * (idempotent — a repeat answers the same set).
+   * Seals the company's decrypted answers with `oneTimeKeyBundle` and POSTs
+   * `{otk, values, inputs}`. Before that, every participant PDF source the current leaf's rules name
+   * that the run HOLDS for the company — a `source_field` whose own answer is a file, a
+   * `source_connection` in `run.sourceFiles` — is fetched (`slots/{slug}/file` resp.
+   * `source-files/{key}`), decrypted with the service key, sealed under the same one-time key and
+   * uploaded to `/generate/inputs`; `inputs` names them. Resolves to the API response
+   * `{documents, status}` — `documents` is one `{output_key, party_key, document_id, position}` per
+   * produced (output document, participant), `position` the step's 1-based place in the run's
+   * signing line or null for an unlisted party (idempotent — a repeat answers the same set).
+   * `flows.source_pdf_invalid` refuses a source that is not a usable PDF (the run stays
+   * `generating`).
    */
   async generateFlowDocument(run: FlowRun): Promise<unknown> {
-    const body = oneTimeKeyBundle(this.decryptRunAnswers(run));
-    return this.http.post(`${FLOW_RUNS}/${run.id}/generate`, { json: body });
+    return generateWithInputs(
+      (path, body) => this.http.post(path, { json: body }),
+      `${FLOW_RUNS}/${run.id}/generate`,
+      this.decryptRunAnswers(run),
+      heldSources(run.definition, run.currentNode, run.answers, run.serviceUserId, run.sourceFiles),
+      (src) => this.ownSourceEnvelope(run.id, src),
+    );
+  }
+
+  /** The company's own copy of one held source, decrypted to its envelope JSON. */
+  private async ownSourceEnvelope(runId: string, src: HeldSource): Promise<string> {
+    const wrapper =
+      src.kind === 'field'
+        ? (await this.binaryFetch(`${FLOW_RUNS}/${runId}/slots/${encodeURIComponent(src.slug ?? '')}/file`)).wrapper
+        : await this.flowRunSourceFile(runId, src.sourceKey);
+    if (wrapper === undefined || wrapper === null) {
+      throw new DecryptError(`no sealed copy of ${src.sourceKey} was served`);
+    }
+    return this.decryptValue(wrapper);
   }
 
   /**
@@ -1534,6 +1628,20 @@ function docObj(body: unknown): Json {
 }
 
 /** Coerce a response body to a plain JSON object (else `{}`). */
+/** A sealed wrapper as the JSON string an upload body carries. */
+function sealedString(sealedValue: EncWrapper | string): string {
+  return typeof sealedValue === 'string' ? sealedValue : JSON.stringify(sealedValue);
+}
+
+/** The `file` of an upload's `201 {file}` response. */
+function responseFile(body: unknown): string {
+  const f = body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Json)['file'] : undefined;
+  if (typeof f !== 'string' || f === '') {
+    throw new ApiError(0, null, 'the upload response carried no file');
+  }
+  return f;
+}
+
 function asJson(body: unknown): Json {
   if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
     return body as Json;

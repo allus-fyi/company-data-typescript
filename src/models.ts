@@ -948,6 +948,12 @@ export class FlowRun {
      * did not send the list — unknown, which the SDK treats as private for every other party.
      */
     readonly privateSlugs: string[] | null = null,
+    /**
+     * The viewer's own copies of the run's connection sources, `{source_key: file}` — the owning
+     * company's on the service `Client`, the customer's own on `CustomerClient`. Empty when the run
+     * holds none.
+     */
+    readonly sourceFiles: Record<string, string> = {},
   ) {}
 
   /** The party key the company is bound to (`bindings[key] === companyUserId`). */
@@ -1021,8 +1027,20 @@ export class FlowRun {
       Array.isArray(o['private_slugs'])
         ? (o['private_slugs'] as unknown[]).filter((x) => x !== null && x !== undefined).map((x) => String(x))
         : null,
+      sourceFilesOf(o['source_files']),
     );
   }
+}
+
+/** A run read's `source_files` map, keeping only string file names. */
+function sourceFilesOf(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+  }
+  return out;
 }
 
 // ── shared list extraction ───────────────────────────────────────────────────
