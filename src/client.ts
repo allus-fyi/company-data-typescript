@@ -1157,8 +1157,9 @@ export class Client {
    * answered connection source (`conn:<party>:<request_slug>`) a rule of the pinned version names,
    * per distinct bound user — the company's own copy sealed to the service key. A start whose list is
    * not exactly that set is refused with {@link ApiError} `flows.source_files_invalid`, whose
-   * `details` carry `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`); nothing
-   * is written.
+   * `details` carry `missing` (`[{source_key, for_user_id, source_user_id}]` — `source_user_id` the
+   * customer bound to the source's party, whose shared file each copy is) and `unexpected`
+   * (`[file]`); nothing is written.
    *
    * Reads the flow's latest published version ({@link publishedFlow}) and pins it with
    * `flow_version`. When that version's text elements show the connected customer's shared values
@@ -1288,14 +1289,18 @@ export class Client {
   /**
    * Stage one sealed copy of a connection source for a run start → its `file`.
    *
-   * `POST /api/company-data/flows/{flowId}/run-files` with `{value}`: `sealedValue` is the source's
-   * envelope JSON sealed to ONE bound user (a `{"_enc":1,…}` wrapper, as an object or its JSON
-   * string). Name the returned file in {@link triggerFlowRun}'s `sourceFiles`. An over-budget value
-   * is refused `documents.too_large`.
+   * `POST /api/company-data/flows/{flowId}/run-files` with `{source_user_id, value}`:
+   * `sourceUserId` is the connected customer whose shared PDF this copies (the `source_user_id` a
+   * refused start's `missing` entry names — the user bound to the source's party); the copy is stored
+   * in that customer's home region. `sealedValue` is the source's envelope JSON sealed to ONE bound
+   * user (a `{"_enc":1,…}` wrapper, as an object or its JSON string). Name the returned file in
+   * {@link triggerFlowRun}'s `sourceFiles`; the start accepts it only for a source whose party is
+   * bound to `sourceUserId`. A customer that is not connected to the service is refused
+   * `flows.source_user_invalid`, an over-budget value `documents.too_large`.
    */
-  async stageRunFile(flowId: string, sealedValue: EncWrapper | string): Promise<string> {
+  async stageRunFile(flowId: string, sourceUserId: string, sealedValue: EncWrapper | string): Promise<string> {
     const body = await this.http.post(`${FLOWS}/${flowId}/run-files`, {
-      json: { value: sealedString(sealedValue) },
+      json: { source_user_id: sourceUserId, value: sealedString(sealedValue) },
     });
     return responseFile(body);
   }

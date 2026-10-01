@@ -938,7 +938,7 @@ run does not hold does not match; the next rule is tried.
 
 ```ts
 triggerFlowRun(flowId, { connectionId, bindings, sourceFiles? }): Promise<FlowRun>  // sourceFiles: [{source_key, for_user_id, file}]
-stageRunFile(flowId, sealedValue): Promise<string>                      // POST /flows/{flowId}/run-files {value} → file
+stageRunFile(flowId, sourceUserId, sealedValue): Promise<string>        // POST /flows/{flowId}/run-files {source_user_id, value} → file
 uploadAnswerFile(runId, slug, forUserId, sealedValue): Promise<string>  // POST /flow-runs/{runId}/answer-files {slug, for_user_id, value} → file
 flowRunSourceFile(runId, sourceKey): Promise<EncWrapper | string | null | undefined>  // GET /flow-runs/{runId}/source-files/{sourceKey} — the stored wrapper
 ```
@@ -946,10 +946,15 @@ flowRunSourceFile(runId, sourceKey): Promise<EncWrapper | string | null | undefi
 * **Connection sources are copied at run start.** For each answered `conn:` source a rule of the
   flow's latest published version names, seal the source's envelope JSON once per distinct bound user
   (your own copy to the service key, a person's to their public key, a company customer's to its
-  account key), stage each with `stageRunFile`, and pass the files as `sourceFiles`. A start whose list
-  is not exactly that set is refused with `ApiError` `flows.source_files_invalid`; its `details` carry
-  `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing is written. The
-  copy is a snapshot: a later change on the connection does not reach the run.
+  account key), stage each with `stageRunFile(flowId, sourceUserId, sealed)` — `sourceUserId` the
+  customer bound to the source's party, whose shared PDF the copy is; the copy is stored in that
+  customer's home region — and pass the files as `sourceFiles`. A start whose list is not exactly that
+  set, or whose copy was staged for another customer than the one bound to its source's party, is
+  refused with `ApiError` `flows.source_files_invalid`; its `details` carry `missing`
+  (`[{source_key, for_user_id, source_user_id}]`) and `unexpected` (`[file]`), and nothing is written.
+  Staging a copy for a customer that is not connected to the service is refused
+  `flows.source_user_invalid`. The copy is a snapshot: a later change on the connection does not reach
+  the run.
 * `sealedValue` is a `{"_enc":1,…}` wrapper (as returned by `encryptForPublicKey`) or its JSON string.
   Staged copies and generation inputs share one size budget; an over-budget one is refused
   `documents.too_large`.
