@@ -1235,6 +1235,14 @@ try {
 }
 ```
 
+**503 `db.writes_paused` — saving is paused, retry.** While the platform cannot
+complete a save in every region, any call that is not a GET, the change-feed
+drains (`processChanges`, `drainBatch`) and `OAuthClient.pollResult` can throw
+`ApiError` with `status` 503 and `errorKey` `db.writes_paused`, sent with
+`Retry-After: 30`. Nothing was written (a drain drained nothing), so wait 30
+seconds and repeat the same call; the SDK does not retry it. Reads and token
+requests keep working.
+
 See [`docs/errors.md`](docs/errors.md).
 
 ---

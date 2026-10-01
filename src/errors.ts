@@ -50,6 +50,11 @@ export class AuthError extends AllusError {}
  * Carries the HTTP `status`, the platform `errorKey` (when the body provided one),
  * and a human-readable `message`. A transport failure (no HTTP response — e.g. a
  * connection error) surfaces as `new ApiError(0, null, …)`.
+ *
+ * A 503 `db.writes_paused` means saving is paused (the platform cannot complete a save in
+ * every region). Nothing was written, so the call is safe to repeat; the response's
+ * `Retry-After` is 30 seconds. Any call that is not a GET, the change-feed drains and
+ * `OAuthClient.pollResult` can throw it; the token request cannot. The SDK does not retry it.
  */
 export class ApiError extends AllusError {
   readonly status: number;
