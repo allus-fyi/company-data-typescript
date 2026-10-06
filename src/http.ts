@@ -117,6 +117,9 @@ export type Clock = () => number;
 const defaultSleep: Sleep = (seconds) => new Promise((res) => setTimeout(res, Math.max(0, seconds) * 1000));
 const defaultClock: Clock = () => Date.now() / 1000;
 
+/** Milliseconds one request of {@link FetchTransport} waits for the platform's answer, body included. */
+const REQUEST_TIMEOUT_MS = 45_000;
+
 /** Default transport over Node's global `fetch`. */
 export class FetchTransport implements HttpTransport {
   async post(url: string, form: Record<string, string>, headers: Record<string, string>): Promise<HttpResponse> {
@@ -125,6 +128,7 @@ export class FetchTransport implements HttpTransport {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return resp;
   }
@@ -140,7 +144,7 @@ export class FetchTransport implements HttpTransport {
       for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
       full += (url.includes('?') ? '&' : '?') + qs.toString();
     }
-    const resp = await fetch(full, { method: 'GET', headers });
+    const resp = await fetch(full, { method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     return resp;
   }
 
@@ -157,9 +161,15 @@ export class FetchTransport implements HttpTransport {
       for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
       full += (url.includes('?') ? '&' : '?') + qs.toString();
     }
-    const init: { method: string; headers: Record<string, string>; body?: string | Uint8Array } = {
+    const init: {
+      method: string;
+      headers: Record<string, string>;
+      body?: string | Uint8Array;
+      signal: AbortSignal;
+    } = {
       method,
       headers: { ...headers },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     };
     if (body?.raw !== undefined) {
       init.headers['Content-Type'] = body.contentType ?? 'application/octet-stream';
