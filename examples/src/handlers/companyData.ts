@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { BinaryHandle, Client, WebhookError, type Change, type Headers } from '@allus-fyi/company-data';
+import { ApiError, BinaryHandle, Client, WebhookError, type Change, type Headers } from '@allus-fyi/company-data';
 
 import { Runtime, recordCall, type RunRecord } from '../runtime.js';
 import { TimeoutTransport } from '../timeoutTransport.js';
@@ -62,9 +62,10 @@ const CALL_REQUEST_FIELDS =
 const CALL_PROCESS_CHANGES =
   'Client.processChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store';
 const CALL_CREATE_DOCUMENT = 'Client.createDocument — {label}';
-const CALL_LIST_DOCUMENTS =
-  "Client.listDocuments — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created";
-const CALL_DELETE_DOCUMENT = 'Client.deleteDocument — DELETE /api/company-data/documents/{id}';
+const CALL_DELETE_DOCUMENT =
+  'Client.deleteDocument — DELETE /api/company-data/documents/{id}: one document this example created';
+const CALL_END_DOCUMENT =
+  'Client.updateDocumentStatus — PUT /api/company-data/documents/{id}: status ended, because the platform refuses to delete a contract that carries a signature';
 const CALL_WEBHOOK_STARTED =
   '(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback';
 const CALL_VERIFY_WEBHOOK =
@@ -129,6 +130,10 @@ export class CompanyDataHandler {
     }
     if (id === DOCUMENTS) {
       meta.share_code = str(in_.shareCode); // the per-person/contract target
+      // The saved service the run and the clean-up act as; the record of created documents is kept
+      // across saves, each entry tagged with the service that created it.
+      meta.client_id = str(in_.clientId);
+      meta.created_documents = this.createdDocuments();
       // Preserve presence so doDocuments can distinguish an explicit empty selection from an
       // absent selection; absence means all document types.
       if (Object.prototype.hasOwnProperty.call(in_, 'documentTypes')) {
@@ -341,6 +346,7 @@ export class CompanyDataHandler {
       }
       calls.push(CALL_CREATE_DOCUMENT.replace('{label}', spec.label));
       const doc = await client.createDocument(opts);
+      this.recordCreatedDocument(doc.id);
       docs.push({ index: docs.length + 1, label: spec.label, document_id: doc.id, status: doc.status });
     }
     return { docs };
@@ -349,10 +355,11 @@ export class CompanyDataHandler {
   // ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ─────────
 
   /**
-   * Delete every document the documents scenario has created on this service, so a reused
-   * account can reset between runs — companydata:documents is additive (createDocument mints a
-   * new document each run; nothing deletes a prior run's). Not part of the generic dispatch:
-   * routed directly by the server, the same way /enroll is identity-only.
+   * Remove the documents the documents scenario created, so a reused account can reset between runs —
+   * companydata:documents is additive (createDocument mints a new document each run; nothing deletes a
+   * prior run's). Only the ids this example recorded are touched; a document of the service it did not
+   * create is never listed or deleted. Not part of the generic dispatch: routed directly by the server,
+   * the same way /enroll is identity-only.
    */
   async cleanup(id: string, res: ServerResponse): Promise<void> {
     if (id !== DOCUMENTS) return sendJson(res, { error: 'not_found' }, 404);
@@ -371,19 +378,60 @@ export class CompanyDataHandler {
     sendJson(res, { runId, action: { type: 'data' } });
   }
 
+  /**
+   * Delete each document recorded for the saved service. A contract that carries a signature is refused
+   * with documents.contract_immutable: it is set to status ended instead and reported in `ended`, and the
+   * clean-up goes on. A document already gone (documents.not_found) needs nothing. Each id leaves the
+   * record as soon as it is dealt with, so a failure part-way leaves only the unprocessed ones. Documents
+   * recorded for another service stay in the record untouched until that service is saved again.
+   */
   private async doCleanupDocuments(client: Client, calls: string[]): Promise<Record<string, unknown>> {
     let deleted = 0;
-    for (;;) {
-      calls.push(CALL_LIST_DOCUMENTS);
-      const page = await client.listDocuments({ limit: 100, offset: 0 });
-      if (page.length === 0) break;
-      for (const doc of page) {
-        calls.push(CALL_DELETE_DOCUMENT.replace('{id}', doc.id));
-        await client.deleteDocument(doc.id);
+    const ended: string[] = [];
+    const clientId = str(this.rt.readConfigMeta(DOCUMENTS).client_id);
+    for (const rec of this.createdDocuments()) {
+      if (rec.client_id !== clientId) continue;
+      const docId = rec.id;
+      calls.push(CALL_DELETE_DOCUMENT.replace('{id}', docId));
+      try {
+        await client.deleteDocument(docId);
         deleted++;
+      } catch (e) {
+        if (!(e instanceof ApiError)) throw e;
+        if (e.errorKey === 'documents.contract_immutable') {
+          calls.push(CALL_END_DOCUMENT.replace('{id}', docId));
+          await client.updateDocumentStatus(docId, 'ended');
+          ended.push(docId);
+        } else if (e.errorKey !== 'documents.not_found') {
+          throw e;
+        }
+        // not_found: already removed elsewhere — nothing left to clean up
       }
+      this.forgetCreatedDocument(docId, clientId);
     }
-    return { deleted };
+    return { deleted, ended };
+  }
+
+  /** The documents this example created, kept in the documents scenario's setup sidecar. */
+  private createdDocuments(): { id: string; client_id: string }[] {
+    const raw = this.rt.readConfigMeta(DOCUMENTS).created_documents;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((r) => ({ id: str((r as Record<string, unknown>)?.id), client_id: str((r as Record<string, unknown>)?.client_id) }));
+  }
+
+  private recordCreatedDocument(docId: string): void {
+    const clientId = str(this.rt.readConfigMeta(DOCUMENTS).client_id);
+    this.writeCreatedDocuments([...this.createdDocuments(), { id: docId, client_id: clientId }]);
+  }
+
+  private forgetCreatedDocument(docId: string, clientId: string): void {
+    this.writeCreatedDocuments(this.createdDocuments().filter((r) => !(r.id === docId && r.client_id === clientId)));
+  }
+
+  private writeCreatedDocuments(records: { id: string; client_id: string }[]): void {
+    const meta = this.rt.readConfigMeta(DOCUMENTS);
+    meta.created_documents = records;
+    this.rt.writeConfigMeta(DOCUMENTS, meta);
   }
 
   // ── companydata:webhook — the accumulating run + public receiver ──────────
