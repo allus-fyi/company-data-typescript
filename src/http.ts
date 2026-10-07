@@ -355,6 +355,15 @@ export class HttpClient {
     return this.request('POST', path, opts);
   }
 
+  /**
+   * POST a JSON body returning the whole 2xx {@link RawResponse}, no parse — the counterpart of
+   * {@link getResponse} for a route that answers JSON whatever `config.format` is; the caller
+   * parses it with `parseBody(resp, false)`. Auth/refresh/retry and error mapping are identical.
+   */
+  async postResponse(path: string, json: unknown): Promise<RawResponse> {
+    return this.request('POST', path, { json, wantResponse: true }) as Promise<RawResponse>;
+  }
+
   /** PUT `path` with a JSON body → parsed body. */
   async put(path: string, opts: { json?: unknown } = {}): Promise<unknown> {
     return this.request('PUT', path, opts);

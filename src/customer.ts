@@ -16,7 +16,7 @@
 import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
-import { decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
+import { fetchBatchPublicKey, decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
 import { fileRef, generateWithInputs, heldSources, type HeldSource } from './flowSources.js';
 import { ConfigError, ValidationError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
@@ -779,10 +779,7 @@ export class CustomerClient {
   private async batchKey(userId: string): Promise<KeyObject | null> {
     if (this.pubKeyCache.has(userId)) return this.pubKeyCache.get(userId) ?? null;
     const gen = this.pubKeyGen.get(userId) ?? 0;
-    const body = (await this.http.post(`${KEYS}/batch`, { json: { user_ids: [userId] } })) as Record<string, unknown>;
-    const keys = body?.['keys'] as Record<string, string> | undefined;
-    const spki = keys?.[userId];
-    const loaded = spki ? loadPublicKey(spki) : null;
+    const loaded = await fetchBatchPublicKey(this.http, userId);
     // Store ONLY if no invalidation happened while the request was in flight.
     if ((this.pubKeyGen.get(userId) ?? 0) === gen) this.pubKeyCache.set(userId, loaded);
     return loaded;

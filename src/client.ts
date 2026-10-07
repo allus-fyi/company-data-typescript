@@ -56,6 +56,7 @@ import {
   encryptForPublicKey,
   loadPrivateKey,
   loadPublicKey,
+  fetchBatchPublicKey,
   type BinaryFetchResult,
   type EncWrapper,
 } from './crypto.js';
@@ -175,6 +176,11 @@ export class Client {
    */
   private pubKeyCache: Map<string, KeyObject> = new Map();
   private pubKeyGen: Map<string, number> = new Map();
+  // Run-party public keys, by the party's user id. One generation for the whole map: a rotation
+  // signal names a share code, which does not say which user id it belongs to, so every entry is
+  // dropped and an in-flight fetch must not write back across it.
+  private userPubKeyCache: Map<string, KeyObject> = new Map();
+  private userPubKeyGen = 0;
 
   // The service RSA public key (public half of the loaded private key), derived once.
   private servicePubKey: KeyObject | null = null;
@@ -620,6 +626,8 @@ export class Client {
     this.pubKeyCache.delete(shareCode);
     // Any fetch already in flight must not write its stale result back.
     this.pubKeyGen.set(shareCode, (this.pubKeyGen.get(shareCode) ?? 0) + 1);
+    this.userPubKeyCache.clear();
+    this.userPubKeyGen += 1;
   }
 
   private decryptChange(event: Record<string, unknown>): Change {
@@ -742,6 +750,17 @@ export class Client {
     const key = loadPublicKey(spki);
     // Store ONLY if no invalidation happened while the request was in flight.
     if ((this.pubKeyGen.get(shareCode) ?? 0) === gen) this.pubKeyCache.set(shareCode, key);
+    return key;
+  }
+
+  /** A run party's public key by its user id, through `POST /api/keys/batch`. */
+  private async userPublicKey(userId: string): Promise<KeyObject> {
+    const cached = this.userPubKeyCache.get(userId);
+    if (cached !== undefined) return cached;
+    const gen = this.userPubKeyGen;
+    const key = await fetchBatchPublicKey(this.http, userId);
+    if (key === null) throw new ApiError(0, 'keys.not_found', `no public key for user ${userId}`);
+    if (this.userPubKeyGen === gen) this.userPubKeyCache.set(userId, key);
     return key;
   }
 
@@ -1438,22 +1457,18 @@ export class Client {
   /**
    * Resolve a person party's RSA public key for per-party answer encryption.
    *
-   * Prefers a caller-supplied key, else resolves the person's share_code from the
-   * run's connection → `GET /api/keys/{code}`.
-   *
-   * Integration gap: the run payload exposes neither person public keys nor
-   * per-binding share codes, so the SDK resolves via the connection. Pass
-   * `partyPubKeys` to skip the lookup entirely.
+   * Prefers a caller-supplied key, else fetches the party's key by its user id. A run's
+   * `connectionId` names the company-connection pair, not a service link, so it is never used to
+   * look the party up. Pass `partyPubKeys` to skip the lookup entirely.
    */
   private async flowPersonPublicKey(
-    run: FlowRun,
+    _run: FlowRun,
     uid: string,
     partyPubKeys: Record<string, KeyObject>,
   ): Promise<KeyObject> {
     const supplied = partyPubKeys[uid];
     if (supplied !== undefined) return supplied;
-    const shareCode = await this.resolveShareCode(run.connectionId ?? undefined, uid);
-    return this.recipientPublicKey(shareCode);
+    return this.userPublicKey(uid);
   }
 
   /**

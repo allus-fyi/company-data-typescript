@@ -47,6 +47,7 @@ import { renameSync, unlinkSync, writeFileSync, openSync, fsyncSync, closeSync }
 import { dirname, join, resolve } from 'node:path';
 
 import { DecryptError } from './errors.js';
+import type { HttpClient } from './http.js';
 
 export const GCM_TAG_LEN = 16; // bytes — appended to the AES-GCM ciphertext
 export const GCM_IV_LEN = 12; // bytes
@@ -186,6 +187,24 @@ export function decrypt(wrapper: EncWrapper | string, privateKey: KeyObject): st
     throw new DecryptError('decrypted plaintext is not valid UTF-8');
   }
   return text;
+}
+
+/**
+ * One user's public key through `POST /api/keys/batch`, or null when the user has none.
+ *
+ * The route answers JSON whatever the client's configured format is, so the body is parsed as
+ * JSON. The answer is a flat map `{user_id: {public_key, public_key_sha256, recipient_has_key}}`
+ * carrying every requested id; a user without a key has `public_key` null. `http` is the client's
+ * own HTTP layer, so auth, rebase and retry are its own.
+ */
+export async function fetchBatchPublicKey(http: HttpClient, userId: string): Promise<KeyObject | null> {
+  const body = http.parseBody(await http.postResponse(`/api/keys/batch`, { user_ids: [userId] }), false);
+  let entry: unknown =
+    body !== null && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)[userId]
+      : null;
+  if (entry !== null && typeof entry === 'object') entry = (entry as Record<string, unknown>)['public_key'];
+  return typeof entry === 'string' && entry !== '' ? loadPublicKey(entry) : null;
 }
 
 /**
