@@ -202,30 +202,40 @@ test('decryptRunAnswers decrypts only the company copies', async () => {
 
 // ── submit: per-party fan-out + local routing ─────────────────────────────────
 
+/**
+ * Answers the by-user-id key fetch (POST /api/keys/batch) with spki for the person party and
+ * hands every other write to next.
+ */
+function keysBatch(spki: string, next: WriteRouter): WriteRouter {
+  return (method, url, body) => {
+    if (url.endsWith('/api/keys/batch')) {
+      return new FakeResponse(200, { [PERSON_UID]: { public_key: spki, recipient_has_key: true } });
+    }
+    return next(method, url, body);
+  };
+}
+
 test('submitFlowAnswers fans out per party + routes fallthrough', async () => {
   await withTmp(async (dir) => {
     const spki = vectorPubSpkiB64();
-    const router: Router = (url) => {
-      if (url.endsWith('/company-data/connections/csc-1')) {
-        return new FakeResponse(200, { connection_id: 'csc-1', share_code: 'ABC123' });
-      }
-      if (url.endsWith('/api/keys/ABC123')) return new FakeResponse(200, { public_key: spki });
-      throw new Error('unexpected GET ' + url);
-    };
     const captured: { url?: string; body?: any } = {};
     const writeRouter: WriteRouter = (method, url, body) => {
       captured.url = url;
       captured.body = body?.json;
       return new FakeResponse(200, runObj({ status: 'awaiting_person', current: 'n2' }));
     };
-    const client = makeClientRw(makeConfig(dir), router, writeRouter);
+    const client = makeClientRw(makeConfig(dir), NO_GET, keysBatch(spki, writeRouter));
     const run = FlowRun.fromApi(runObj());
     const out = await client.submitFlowAnswers(run, { company_name: 'ACME BV' });
 
     const body = captured.body;
     assert.ok((captured.url as string).endsWith('/company-data/flow-runs/run-1/answers'));
     assert.equal(body.answers.length, 1);
-    const vals = body.answers[0].values as { for_user_id: string; value: any }[];
+    // a sealed value travels as the wrapper's JSON string
+    const vals = (body.answers[0].values as { for_user_id: string; value: string }[]).map((v) => {
+      assert.equal(typeof v.value, 'string');
+      return { for_user_id: v.for_user_id, value: JSON.parse(v.value) };
+    });
     assert.deepEqual(new Set(vals.map((v) => v.for_user_id)), new Set([COMPANY_UID, PERSON_UID]));
     for (const v of vals) assert.equal(v.value._enc, 1);
     // company copy round-trips with the service private key
@@ -243,19 +253,12 @@ test('submitFlowAnswers fans out per party + routes fallthrough', async () => {
 test('submitFlowAnswers routes guarded edge when condition true', async () => {
   await withTmp(async (dir) => {
     const spki = vectorPubSpkiB64();
-    const router: Router = (url) => {
-      if (url.endsWith('/company-data/connections/csc-1')) {
-        return new FakeResponse(200, { connection_id: 'csc-1', share_code: 'ABC123' });
-      }
-      if (url.endsWith('/api/keys/ABC123')) return new FakeResponse(200, { public_key: spki });
-      throw new Error('unexpected GET ' + url);
-    };
     const captured: { body?: any } = {};
     const writeRouter: WriteRouter = (method, url, body) => {
       captured.body = body?.json;
       return new FakeResponse(200, runObj({ status: 'awaiting_person', current: 'n_end' }));
     };
-    const client = makeClientRw(makeConfig(dir), router, writeRouter);
+    const client = makeClientRw(makeConfig(dir), NO_GET, keysBatch(spki, writeRouter));
     const run = FlowRun.fromApi(runObj());
     await client.submitFlowAnswers(run, { tier: 'vip' });
     // guarded n1→n_end edge matches first; the current node n1 still has edges → not a leaf submit
@@ -356,10 +359,6 @@ test('processFlowRun company-leaf document chains generate', async () => {
         const r = runObj({ status, current: 'n1', definition: single, outputMode: 'document', participants });
         return new FakeResponse(200, r);
       }
-      if (url.endsWith('/company-data/connections/csc-1')) {
-        return new FakeResponse(200, { connection_id: 'csc-1', share_code: 'ABC123' });
-      }
-      if (url.endsWith('/api/keys/ABC123')) return new FakeResponse(200, { public_key: spki });
       throw new Error('unexpected GET ' + url);
     };
     const writeRouter: WriteRouter = (method, url) => {
@@ -370,7 +369,7 @@ test('processFlowRun company-leaf document chains generate', async () => {
       assert.ok(url.endsWith('/generate'));
       return new FakeResponse(200, GENERATED);
     };
-    const client = makeClientRw(makeConfig(dir), router, writeRouter);
+    const client = makeClientRw(makeConfig(dir), router, keysBatch(spki, writeRouter));
     const run = await client.processFlowRun('run-1', () => ({ company_name: 'ACME BV' }));
     assert.ok(state.posts.some((u) => u.endsWith('/answers')));
     assert.ok(state.posts.some((u) => u.endsWith('/generate')));
