@@ -17,7 +17,7 @@ import type { KeyObject } from 'node:crypto';
 
 import { Config } from './config.js';
 import { fetchBatchPublicKey, decrypt as cryptoDecrypt, encryptForPublicKey, loadPublicKey, type EncWrapper } from './crypto.js';
-import { fileRef, generateWithInputs, heldSources, type HeldSource } from './flowSources.js';
+import { fileRef, generateWithInputs, heldSources, sealAnswerValues, type HeldSource } from './flowSources.js';
 import { ConfigError, ValidationError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
@@ -320,6 +320,9 @@ export class CustomerClient {
    * Every answer whose field's default reads another party's private source is marked
    * `source_private: true` before it is sent (the run is read once for the rule), so every later
    * reader treats it as private.
+   *
+   * Every `answers[].values[].value` goes out as the sealed wrapper's JSON string, whether the caller
+   * passed the wrapper {@link encryptFlowAnswer} returns or a string.
    */
   async submitFlowAnswers(connectionId: string, runId: string, body: Record<string, unknown>): Promise<unknown> {
     const answers = body['answers'];
@@ -342,6 +345,7 @@ export class CustomerClient {
         }),
       };
     }
+    body = sealAnswerValues(body);
     return this.http.post(`${CONN}/${connectionId}/flow-runs/${runId}/answers`, { json: body });
   }
 

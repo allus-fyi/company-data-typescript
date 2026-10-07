@@ -9,13 +9,41 @@
  * are not exactly the held set.
  */
 
-import { newOneTimeKey, oneTimeKeyBundle, oneTimeKeySeal } from './crypto.js';
+import { newOneTimeKey, oneTimeKeyBundle, oneTimeKeySeal, type EncWrapper } from './crypto.js';
 import { ApiError } from './errors.js';
 
 type Json = Record<string, unknown>;
 
 function isObject(v: unknown): v is Json {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** A sealed wrapper as the JSON string a flow-answer or upload body carries. */
+export function sealedString(sealedValue: EncWrapper | string): string {
+  return typeof sealedValue === 'string' ? sealedValue : JSON.stringify(sealedValue);
+}
+
+/**
+ * `body` with every `answers[].values[].value` sent as the sealed wrapper's JSON string; a value
+ * that already is a string, and everything else in the body, stays as it is.
+ */
+export function sealAnswerValues(body: Json): Json {
+  const answers = body['answers'];
+  if (!Array.isArray(answers)) return body;
+  return {
+    ...body,
+    answers: answers.map((a) => {
+      if (!isObject(a) || !Array.isArray(a['values'])) return a;
+      return {
+        ...a,
+        values: a['values'].map((v) =>
+          isObject(v) && v['value'] !== null && v['value'] !== undefined
+            ? { ...v, value: sealedString(v['value'] as EncWrapper | string) }
+            : v,
+        ),
+      };
+    }),
+  };
 }
 
 /**

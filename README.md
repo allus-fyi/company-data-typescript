@@ -1081,6 +1081,10 @@ over the live answer map. `customer.submitFlowAnswers` reads the run once and ma
 derived from another party's private source (the same rule) `source_private: true` before it is
 sent.
 
+The wire shape of each `answers[].values[].value` is the sealed wrapper serialized as a JSON string.
+`submitFlowAnswers` and `customer.submitFlowAnswers` send it that way, whether `values[].value` is the
+wrapper object `encryptFlowAnswer` returns or a string; `encryptFlowAnswer` itself still returns the object.
+
 **The evaluator helpers** (exported, pure): `expandPluginAnswers(answers, pluginSlugs)` — a new map
 where each finished plugin answer becomes its summary (the blocks' values joined by `' / '`) plus
 `slug.<block>`, `slug.<block>.id` (a `search_select` pick's id) and `slug.<output>`, and an

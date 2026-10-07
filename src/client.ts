@@ -63,7 +63,7 @@ import {
 import { ApiError, ConfigError, DecryptError, RateLimitError, ValidationError, WebhookError } from './errors.js';
 import { FieldTypeRegistry, type FieldTypeRow } from './fieldTypes.js';
 import { computeConstants, evaluateCondition, expandPluginAnswers } from './flowCondition.js';
-import { fileRef, generateWithInputs, heldSources, type HeldSource } from './flowSources.js';
+import { fileRef, generateWithInputs, heldSources, sealedString, type HeldSource } from './flowSources.js';
 import {
   PluginPass,
   PluginOptions,
@@ -1531,7 +1531,7 @@ export class Client {
       for (const uid of Object.values(run.bindings)) {
         const key =
           uid === run.serviceUserId ? svcPub : await this.flowPersonPublicKey(run, uid, partyPubKeys);
-        values.push({ for_user_id: uid, value: encryptForPublicKey(plain, key) });
+        values.push({ for_user_id: uid, value: sealedString(encryptForPublicKey(plain, key)) });
       }
       const answer: Json = { slug, values };
       // A value whose field's default reads another party's private source is private too, so
@@ -1761,11 +1761,6 @@ function docObj(body: unknown): Json {
 }
 
 /** Coerce a response body to a plain JSON object (else `{}`). */
-/** A sealed wrapper as the JSON string an upload body carries. */
-function sealedString(sealedValue: EncWrapper | string): string {
-  return typeof sealedValue === 'string' ? sealedValue : JSON.stringify(sealedValue);
-}
-
 /** The `file` of an upload's `201 {file}` response. */
 function responseFile(body: unknown): string {
   const f = body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Json)['file'] : undefined;
