@@ -76,8 +76,11 @@ async function main(): Promise<void> {
   // process has exactly ONE failure envelope. Writing `{"error": "server_error", "message": "<reason>"}`
   // by hand here instead would strand the reason in `message`, since the suite renders `error` and
   // nothing else — leaving anything reaching this path as one uninformative word.
+  // Requests run one at a time: each handler starts only after the previous one has settled, because the
+  // handlers await network calls and would otherwise interleave on their read-modify-write of a run.
+  let queue: Promise<void> = Promise.resolve();
   const http = createServer((req, res) => {
-    server.handle(req, res).catch((e) => sendFailure(res, e));
+    queue = queue.then(() => server.handle(req, res).catch((e) => sendFailure(res, e)));
   });
 
   http.on('error', (e: NodeJS.ErrnoException) => {

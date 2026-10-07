@@ -19,8 +19,9 @@ import { join } from 'node:path';
  * `.runtime/` tree; every config/run/meta file is keyed by the PUBLIC scenario id, so the three families
  * never collide.
  *
- * SINGLE-worker server (Node's built-in http = one process) → requests serialize; there is NO
- * concurrency to guard, so there are NO locks, NO tombstones and NO burn-on-read. Everything lives
+ * SINGLE-process server whose launcher (`bin/start.ts`) runs requests one at a time through one promise
+ * chain → requests serialize; there is NO concurrency to guard, so there are NO locks, NO tombstones and
+ * NO burn-on-read. Everything lives
  * under {@link runtimeDir} (git-ignored, wiped at startup):
  *   - config/{sid}.json       — the canonical SDK config file a scenario runs OFF (written by
  *                               POST /api/scenarios/{id}/config from the browser settings; NOT TTL-swept)
