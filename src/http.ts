@@ -20,6 +20,8 @@
  *     {@link AuthError}; a 429 → read `Retry-After` and back off + retry a bounded
  *     number of times, then {@link RateLimitError}; any other non-2xx →
  *     {@link ApiError} carrying the body's `error_key` when present.
+ *   - **A closed connection** — the default {@link FetchTransport} sends a request whose connection
+ *     was closed before the response headers arrived once more before anything is reported.
  *
  * Config-only key handling: the client id/secret come from the {@link Config} —
  * never a method argument.
@@ -120,16 +122,56 @@ const defaultClock: Clock = () => Date.now() / 1000;
 /** Milliseconds one request of {@link FetchTransport} waits for the platform's answer, body included. */
 const REQUEST_TIMEOUT_MS = 45_000;
 
+/**
+ * The `fetch` failure codes that are the connection closing before the response headers arrived:
+ * undici's "other side closed" / "closed" socket error, a reset, a broken pipe.
+ */
+const CLOSED_CONNECTION_CODES = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE']);
+
+/**
+ * `fetch(url, init())`, sent once more when its connection was closed before the response headers
+ * arrived; the second outcome, failure included, is the answer.
+ *
+ * That is the server ending a kept-alive connection on its idle timeout at the moment a request was
+ * written to it: the server never read the request, so sending it again is the request's first
+ * delivery, and the closed connection is never picked again. `fetch` reports neither whether the
+ * connection had carried an earlier request nor whether part of the status line or headers had
+ * arrived, so a first request on a new connection is sent again too, and so is one whose response
+ * had begun but whose headers were cut off. Nothing else is sent again — not a timeout, a refused or
+ * unresolvable connection, a TLS failure — and `fetch` settles once the response headers arrive, so a
+ * failure in the body comes later, outside this call. `init` is called per attempt, so each attempt
+ * has its own timeout.
+ */
+async function fetchResendingOnce(url: string, init: () => RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init());
+  } catch (exc) {
+    if (!closedBeforeResponse(exc)) throw exc;
+  }
+  return fetch(url, init());
+}
+
+/** Whether a `fetch` rejection is the connection closing before any response — by the cause's code. */
+function closedBeforeResponse(exc: unknown): boolean {
+  let cause: unknown = exc;
+  for (let depth = 0; depth < 5 && cause !== null && typeof cause === 'object'; depth++) {
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === 'string' && CLOSED_CONNECTION_CODES.has(code)) return true;
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** Default transport over Node's global `fetch`. */
 export class FetchTransport implements HttpTransport {
   async post(url: string, form: Record<string, string>, headers: Record<string, string>): Promise<HttpResponse> {
     const body = new URLSearchParams(form).toString();
-    const resp = await fetch(url, {
+    const resp = await fetchResendingOnce(url, () => ({
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    }));
     return resp;
   }
 
@@ -144,7 +186,11 @@ export class FetchTransport implements HttpTransport {
       for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
       full += (url.includes('?') ? '&' : '?') + qs.toString();
     }
-    const resp = await fetch(full, { method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const resp = await fetchResendingOnce(full, () => ({
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }));
     return resp;
   }
 
@@ -165,11 +211,9 @@ export class FetchTransport implements HttpTransport {
       method: string;
       headers: Record<string, string>;
       body?: string | Uint8Array;
-      signal: AbortSignal;
     } = {
       method,
       headers: { ...headers },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     };
     if (body?.raw !== undefined) {
       init.headers['Content-Type'] = body.contentType ?? 'application/octet-stream';
@@ -178,7 +222,10 @@ export class FetchTransport implements HttpTransport {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body.json);
     }
-    const resp = await fetch(full, init as RequestInit);
+    const resp = await fetchResendingOnce(
+      full,
+      () => ({ ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }) as RequestInit,
+    );
     return resp;
   }
 }
