@@ -158,4 +158,4 @@ export type {
 // XML (XXE-safe parser — exported for advanced use / testing)
 export { parseXml, XmlParseError } from './xml.js';
 
-export const VERSION = '0.1.0'; // keep in sync with package.json
+export const VERSION = '0.1.1'; // keep in sync with package.json
