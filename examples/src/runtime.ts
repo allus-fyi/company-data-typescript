@@ -62,8 +62,17 @@ export class Runtime {
   readonly routePath: string;
   readonly statePath: string;
 
+  private readonly baseDir: string;
+
+  /** The runtime state directory: EXAMPLE_RUNTIME_DIR when set and non-empty, else `.runtime` in the example directory. */
+  static dirFor(baseDir: string): string {
+    const env = process.env.EXAMPLE_RUNTIME_DIR;
+    return env ? env : join(baseDir, '.runtime');
+  }
+
   constructor(baseDir: string) {
-    this.runtimeDir = join(baseDir, '.runtime');
+    this.baseDir = baseDir;
+    this.runtimeDir = Runtime.dirFor(baseDir);
     this.runsDir = join(this.runtimeDir, 'runs');
     this.configDir = join(this.runtimeDir, 'config');
     this.configKeysDir = join(this.configDir, 'keys');
@@ -132,12 +141,15 @@ export class Runtime {
 
   /**
    * Write a scenario's canonical SDK config file (config endpoint). Atomic write-temp + rename.
-   * Returns the RELATIVE path (for display/inspection in the setup panel).
+   * Returns the path for display/inspection in the setup panel: relative to the example directory
+   * under the default runtime directory, under the selected directory with EXAMPLE_RUNTIME_DIR.
    */
   writeConfig(id: string, config: Record<string, unknown>): string {
     this.ensureDirs();
     this.atomicWrite(this.configPathFor(id), JSON.stringify(config, null, 2));
-    return `.runtime/config/${Runtime.sid(id)}.json`;
+    return this.runtimeDir === join(this.baseDir, '.runtime')
+      ? `.runtime/config/${Runtime.sid(id)}.json`
+      : this.configPathFor(id);
   }
 
   /** Write a scenario's demo-only meta sidecar. */

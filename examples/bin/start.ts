@@ -17,7 +17,7 @@ import { Server, CONTRACT_VERSION } from '../src/server.js';
  * scenario families (identity / flow / company-data) on ONE port.
  *
  * Steps:
- *   1. wipe .runtime/ (fresh state each boot)
+ *   1. wipe the runtime state directory (.runtime/, or EXAMPLE_RUNTIME_DIR; fresh state each boot)
  *   2. on a missing/unverified bundle: fetch the pinned frontend release (frontend.lock), VERIFY sha256,
  *      unpack to .frontend/<tag>/  (a present, verified bundle is a cache hit — nothing is re-fetched)
  *   3. assert the bundle's contract.json version == the backend's implemented CONTRACT_VERSION
