@@ -560,6 +560,21 @@ export class Client {
     });
   }
 
+  /**
+   * End one of THIS service's connections (the service side of a disconnect).
+   *
+   * `DELETE /api/company-data/connections/{id}`. It leaves exactly the state the
+   * customer's own disconnect leaves; the customer is told by the platform, and
+   * `connection_deleted` reaches your change feed and webhooks. Resolves with
+   * nothing. Rejects with an `ApiError`: `404` `company_data.connection_not_found`
+   * for an id that is not a connection of this service, `409`
+   * `company_connections.active_contract` while the customer holds an active
+   * agreement or subscription on it.
+   */
+  async deleteConnection(connectionId: string): Promise<void> {
+    await this.http.delete(`${CONNECTIONS}/${connectionId}`);
+  }
+
   // ── logs (moderate rate-limit) ──────────────────────────────────────────────
 
   /**

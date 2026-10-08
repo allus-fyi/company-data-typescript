@@ -248,6 +248,21 @@ const phone = conn.values['mobile'];
 if (phone) console.log(phone.value, phone.live ? 'live' : 'snapshot');
 ```
 
+### `deleteConnection(connectionId)`
+
+```ts
+deleteConnection(connectionId: string): Promise<void>
+```
+
+End one of this service's connections (`DELETE /api/company-data/connections/{id}`). It leaves exactly the state the customer's own disconnect leaves: the link, the answers and copies held through it and the pair's messages on this service are deleted; the company connection, documents, signatures and flow runs stay. The customer is told by the platform, and `connection_deleted` reaches your change feed and webhooks. A customer whose account was deleted can still be disconnected. Reconnecting stays possible.
+
+* **Returns:** nothing.
+* **Throws:** `AuthError`, `ApiError`, `RateLimitError`; refusals are `404` `company_data.connection_not_found` (an id that is not a connection of this service) and `409` `company_connections.active_contract` (the customer holds an active agreement or subscription on this service).
+
+```ts
+await client.deleteConnection(connId);
+```
+
 ### `logs(limit?, offset?)`
 
 ```ts
