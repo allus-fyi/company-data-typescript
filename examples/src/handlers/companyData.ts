@@ -199,6 +199,7 @@ export class CompanyDataHandler {
           value: await valueToJson(v.value),
           live: v.live,
           at: v.updatedAt?.toISOString() ?? null,
+          unreadable: v.unreadable,
         })),
       );
       connections.push({

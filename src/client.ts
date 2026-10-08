@@ -80,7 +80,7 @@ import {
 } from './flowPlugins.js';
 import { HttpClient, type HttpClientOptions } from './http.js';
 import { TwoFactorClient } from './twoFactor.js';
-import { Change, Connection, Document, FlowRun, LogEntry, PublishedFlow, RequestField } from './models.js';
+import { Change, Connection, Document, FlowRun, FlowRunAnswers, LogEntry, PublishedFlow, RequestField } from './models.js';
 import { createHash, createPublicKey } from 'node:crypto';
 import { nonOwnerPartyTags, type PartyTag } from './flowText.js';
 import { Pump, type Handler, type Logger, type ProcessOptions } from './pump.js';
@@ -1389,15 +1389,16 @@ export class Client {
   }
 
   /**
-   * A completed run's DECRYPTED answers as `{ slug: plaintext }`. Accepts a loaded
-   * {@link FlowRun} or a run id (fetched via {@link flowRun}). The public accessor for a finished
-   * run's answers; the private {@link decryptRunAnswers} it wraps is otherwise reached only inside
-   * {@link processFlowRun}, which returns an already-completed run untouched, so those answers were
-   * previously unreadable.
+   * A completed run's DECRYPTED answers → {@link FlowRunAnswers}. Accepts a loaded {@link FlowRun}
+   * or a run id (fetched via {@link flowRun}). The public accessor for a finished run's answers,
+   * which {@link processFlowRun} returns untouched.
+   *
+   * An answer the service key cannot open never fails the call: it is left out of `answers` and its
+   * slug is listed in `unreadable`.
    */
-  async flowRunAnswers(run: FlowRun | string): Promise<Record<string, unknown>> {
+  async flowRunAnswers(run: FlowRun | string): Promise<FlowRunAnswers> {
     const flowRun = run instanceof FlowRun ? run : await this.flowRun(run);
-    return this.decryptRunAnswers(flowRun);
+    return this.openRunAnswers(flowRun, true);
   }
 
   /**
@@ -1447,12 +1448,23 @@ export class Client {
   }
 
   /**
-   * Decrypt the company's service-key answer copies → `{slug: plaintext}`.
-   * Only the rows whose `for_user_id` is the company's bound user_id are decryptable
-   * with the service private key; the person's copies are skipped.
+   * Decrypt the company's service-key answer copies → `{slug: plaintext}`, failing on the first
+   * answer that does not open. Routing and generation read the run's whole answer set, so a missing
+   * answer there would route or fill on a value that is not the run's.
    */
   private decryptRunAnswers(run: FlowRun): Record<string, unknown> {
+    return this.openRunAnswers(run, false).answers;
+  }
+
+  /**
+   * Open the company's service-key answer copies. Only the rows whose `for_user_id` is the
+   * company's bound user_id are decryptable with the service private key; the person's copies are
+   * skipped. With `skipUnreadable` an answer that does not open ({@link DecryptError}) is left out
+   * and its slug listed in `unreadable`; without it the error propagates.
+   */
+  private openRunAnswers(run: FlowRun, skipUnreadable: boolean): FlowRunAnswers {
     const out: Record<string, unknown> = {};
+    const unreadable: string[] = [];
     for (const row of run.answers) {
       if (row['for_user_id'] !== run.serviceUserId) continue;
       const slug = row['slug'];
@@ -1464,9 +1476,14 @@ export class Client {
         out[slug] = typeof v === 'string' ? v : JSON.stringify(v);
         continue;
       }
-      out[slug] = cryptoDecrypt(v as EncWrapper | string, this.privateKey);
+      try {
+        out[slug] = cryptoDecrypt(v as EncWrapper | string, this.privateKey);
+      } catch (err) {
+        if (!skipUnreadable || !(err instanceof DecryptError)) throw err;
+        unreadable.push(slug);
+      }
     }
-    return out;
+    return new FlowRunAnswers(out, unreadable);
   }
 
   /**

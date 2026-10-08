@@ -129,7 +129,7 @@ bundle server) — not the SDK example.
 | **Trigger** (`/start`) | `Client.fromConfig` → `requestFields()` (resolve flow name + version → flow id) → `identity()` (company party) → `connections()` (resolve share code → person party) → `triggerFlowRun(flowId, {connectionId, bindings})` |
 | **Drive** (`/api/runs` poll, company turn) | `flowRun()` → `processFlowRun(flowRunId, fillNode)` — the `email` field is filled invalid once (`ValidationError` → ✗), then valid (→ ✓) |
 | **Wait** (person's turn) | `flowRun()` reports `awaiting_<person party>` → the run sits in `waiting_person`; the next poll resumes automatically |
-| **Complete** (run `completed`) | `flowRunAnswers()` (decrypted `{slug: value}`), plus `flowRunDocument(flowRunId, outputKey)` for each output document in the company participant's `documents` (the `document` fixture) |
+| **Complete** (run `completed`) | `flowRunAnswers()` (decrypted `answers` `{slug: value}` and the `unreadable` slugs), plus `flowRunDocument(flowRunId, outputKey)` for each output document in the company participant's `documents` (the `document` fixture) |
 
 The flow ships **two importable fixtures** in `fixtures/` — `info-gathering.zip` (`data_only`: a few
 company steps incl. an email validation-demo step, then a person turn) and `contract.zip` (`document`:

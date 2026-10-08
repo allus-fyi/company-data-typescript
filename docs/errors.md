@@ -171,7 +171,9 @@ If you catch it, wait `err.retryAfter` (or a default) before retrying.
 | `Client.fromConfig` / `fromEnv` | `ConfigError` |
 | Token / any call (auth) | `AuthError` |
 | `connections`, `connection`, `requestFields`, `logs`, pump drains | `ApiError`, `RateLimitError` |
-| Value access / `BinaryHandle.bytes()` / pump delivery | `DecryptError`; `BinaryHandle.bytes()` also `ApiError` (a 410 `company_data.file_expired` on an expired frozen answer) |
+| `BinaryHandle.bytes()` / pump delivery / `parseWebhook` / flow-run routing and generation | `DecryptError`; `BinaryHandle.bytes()` also `ApiError` (a 410 `company_data.file_expired` on an expired frozen answer) |
+| `connections`, `connection` (a value that cannot be opened) | none — the `Value` reads `unreadable` |
+| `flowRunAnswers` (an answer that cannot be opened) | none — its slug is listed in `FlowRunAnswers.unreadable` |
 | `verifyWebhook` / `parseWebhook` / `handleWebhook` | `WebhookError` (`verifyWebhook` returns `false` rather than throwing on a bad signature) |
 
 ## Example
@@ -189,7 +191,7 @@ try {
   if (e instanceof ConfigError) { /* fix the config / key file */ }
   else if (e instanceof AuthError) { /* bad/revoked credentials */ }
   else if (e instanceof RateLimitError) { await sleep((e.retryAfter ?? 60) * 1000); }
-  else if (e instanceof DecryptError) { /* wrong service key or corrupt data */ }
+  else if (e instanceof DecryptError) { /* a binary value's bytes could not be opened (wrong service key or corrupt data) */ }
   else if (e instanceof ApiError) { log(e.status, e.errorKey, e.apiMessage); }
   else throw e;
 }

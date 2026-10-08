@@ -8,7 +8,7 @@
  *     RequestField { slug, label, type, oneTime, mandatory, verified, verifiedMaxAgeDays, plugin }
  *     Connection   { id, personId, displayName, connectedAt, values: {<slug>: Value} }
  *     Value        { value, live, updatedAt, verified, verifiedAt, verifiedExpiresAt,
- *                    verifiedMethod, verifiedProvider, verificationId }
+ *                    verifiedMethod, verifiedProvider, verificationId, unreadable }
  *     Change       { id, event, personId, shareCode?, slug?, value?, live?, at }   // id = stable dedup key
  *     LogEntry     { type, message, metadata, at }
  *
@@ -305,6 +305,14 @@ function verifiedFrom(obj: Json, plaintext: unknown): boolean {
   return hashMatches(vsalt, vhash, plaintext);
 }
 
+/**
+ * A single answer for one of YOUR request slots.
+ *
+ * {@link unreadable} marks an answer that is present but could not be opened with the configured
+ * service key — sealed to a key the service has since replaced, or a wrong configured key. Such a
+ * value carries {@link value} null and {@link verified} false, and never fails the read it arrived
+ * in. An unanswered value is {@link value} null with {@link unreadable} false.
+ */
 export class Value {
   constructor(
     readonly value: unknown,
@@ -334,9 +342,21 @@ export class Value {
     /** The id to quote back to allme in a dispute. Same all-or-none set. */
     readonly verificationId: string | null,
     readonly raw: Json,
+    /**
+     * True when the answer is present but could not be opened with the configured service key;
+     * {@link value} is then null and {@link verified} false. Every value of every connection
+     * reading true points at the configured key.
+     */
+    readonly unreadable: boolean = false,
   ) {}
 
-  /** Build a typed Value from one hardened `{value|value_url, live, updatedAt}` entry. */
+  /**
+   * Build a typed Value from one hardened `{value|value_url, live, updatedAt}` entry.
+   *
+   * An entry whose value cannot be opened ({@link DecryptError}) is built marked
+   * {@link unreadable}, with no plaintext; every other member is read from the entry as for a
+   * readable one. Any other failure propagates.
+   */
   static fromApi(
     obj: Json,
     opts: {
@@ -348,7 +368,14 @@ export class Value {
   ): Value {
     const live = Boolean(coerceBool(obj['live']));
     const updatedAt = parseIsoDate(obj['updatedAt'] ?? obj['updated_at']);
-    const typed = typedValue(obj, opts);
+    let typed: unknown = null;
+    let unreadable = false;
+    try {
+      typed = typedValue(obj, opts);
+    } catch (err) {
+      if (!(err instanceof DecryptError)) throw err;
+      unreadable = true;
+    }
     return new Value(
       typed,
       live,
@@ -360,6 +387,7 @@ export class Value {
       obj['verified_provider'] != null ? String(obj['verified_provider']) : null,
       obj['verification_id'] != null ? String(obj['verification_id']) : null,
       obj,
+      unreadable,
     );
   }
 }
@@ -1096,6 +1124,21 @@ function tagValuesOf(raw: unknown): FlowRunTagValues | null {
     publicTags: Array.isArray(o['public_tags']) ? (o['public_tags'] as unknown[]).filter((x) => typeof x === 'string') as string[] : [],
     private: priv,
   };
+}
+
+/**
+ * A run's answers as the company's service key opens them.
+ *
+ * {@link answers} holds every answer the key opened, `{slug: plaintext}`; {@link unreadable} lists
+ * the slugs of the answers present on the run that it could not open (sealed to a key the service
+ * has since replaced, or a wrong configured key), empty when every answer opened. An unreadable slug
+ * is never in {@link answers}.
+ */
+export class FlowRunAnswers {
+  constructor(
+    readonly answers: Record<string, unknown>,
+    readonly unreadable: string[] = [],
+  ) {}
 }
 
 /** The latest published version of a flow — what {@link AllusClient.triggerFlowRun} compiles from. */

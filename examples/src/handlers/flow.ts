@@ -379,7 +379,7 @@ export class FlowHandler {
     run.calls = addCall(run.calls, CALL_ANSWERS);
     const answers = await client.flowRunAnswers(flowRun);
     const ciphers = ownCipherBySlug(flowRun);
-    run.answers = Object.entries(answers).map(([slug, value]) => ({ slug, value, cipher: ciphers[slug] ?? null }));
+    run.answers = Object.entries(answers.answers).map(([slug, value]) => ({ slug, value, cipher: ciphers[slug] ?? null }));
 
     if (flowRun.outputMode === 'document') {
       const documents: Record<string, unknown>[] = [];

@@ -104,6 +104,7 @@ export {
   LogEntry,
   PluginValue,
   RequestFieldPlugin,
+  FlowRunAnswers,
   PublishedFlow,
 } from './models.js';
 export type { TypeForSlug, PluginBlock, PluginOutput, FlowRunTagValues } from './models.js';
