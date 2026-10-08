@@ -3,10 +3,8 @@ import type { ServerResponse } from 'node:http';
 import {
   ApiError,
   Client,
-  Config,
   ConfigError,
   Connection,
-  DEFAULT_AUTHORIZE_URL,
   OAuthClient,
   type Claim,
   type OAuthClientOptions,
@@ -56,7 +54,6 @@ const CLAIM_VALUE_SCENARIOS = new Set([3, 4, 5]);
 const OAUTH_URL_SCENARIOS = new Set([1, 2, 3, 4, 8]);
 
 const DEFAULT_API_URL = 'https://api.allme.fyi';
-const DEFAULT_AUTHORIZE_BASE = DEFAULT_AUTHORIZE_URL; // https://web.allme.fyi/auth
 
 /** Short-cycled poll timeout (ms) for the detached/challenge waits — bounds one worker per poll. */
 const POLL_TIMEOUT_MS = 2000;
@@ -79,9 +76,7 @@ const NO_ORIGIN =
  * worse than a short one.
  */
 const CALL_IDW_BUILD =
-  'OAuthClient.fromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI';
-const CALL_IDW_BUILD_LOCAL =
-  'new OAuthClient(Config.fromIdwFile(…)) — builds the RP client from the saved config file: client id, secret and the registered redirect URI';
+  'OAuthClient.fromConfig — builds the RP client from the saved config file: client id, secret, the registered redirect URI and the sign-in address';
 const CALL_AUTH_SIGNIN =
   'OAuthClient.authorizeUrl — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)';
 const CALL_AUTH_SIGNIN_DETACHED =
@@ -166,6 +161,8 @@ export class IdentityHandler {
     };
     const secret = str(in_.oauthClientSecret);
     if (secret !== '') cfg.oauth_client_secret = secret;
+    const authorizeUrl = str(in_.authorizeBase);
+    if (authorizeUrl !== '' && OAUTH_URL_SCENARIOS.has(id)) cfg.authorize_url = authorizeUrl;
 
     // Any scenario whose run can carry claim values (CLAIM_VALUE_SCENARIOS) needs the OAuth app
     // private key to decrypt them (config-only keys).
@@ -190,9 +187,6 @@ export class IdentityHandler {
 
     // Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
     const meta: Record<string, unknown> = {};
-    if (OAUTH_URL_SCENARIOS.has(id)) {
-      meta.authorize_base = str(in_.authorizeBase) || DEFAULT_AUTHORIZE_BASE;
-    }
     if (id === 3) meta.claims = this.claims(in_);
     if (id === 8) {
       meta.share_code = str(in_.shareCode);
@@ -223,7 +217,7 @@ export class IdentityHandler {
         const mode = id === 1 ? 'signin' : id === 3 ? 'one_time' : 'connect';
         const claims: Claim[] = id === 3 ? this.claimObjects((this.rt.readConfigMeta(idStr).claims as string[]) ?? []) : [];
         run.calls = [
-          this.idwBuildCall(idStr),
+          CALL_IDW_BUILD,
           id === 3 ? CALL_AUTH_ONE_TIME : id === 4 ? CALL_AUTH_CONNECT : CALL_AUTH_SIGNIN,
         ];
         const oauth = this.oauthClientFor(idStr);
@@ -238,7 +232,7 @@ export class IdentityHandler {
         const pkce = generatePkce();
         run.verifier = pkce.verifier;
         run.wait = 'detached_signin';
-        run.calls = [this.idwBuildCall(idStr), CALL_AUTH_SIGNIN_DETACHED];
+        run.calls = [CALL_IDW_BUILD, CALL_AUTH_SIGNIN_DETACHED];
         const oauth = this.oauthClientFor(idStr);
         const url = oauth.authorizeUrl('signin', { state: runId, responseMode: 'detached', codeChallenge: pkce.challenge });
         this.rt.writeRun(runId, run);
@@ -301,7 +295,7 @@ export class IdentityHandler {
       isEnroll: true,
       status: 'pending',
       state: runId,
-      calls: [this.idwBuildCall(idStr), responseMode === 'detached' ? CALL_AUTH_ENROLL_DETACHED : CALL_AUTH_ENROLL],
+      calls: [CALL_IDW_BUILD, responseMode === 'detached' ? CALL_AUTH_ENROLL_DETACHED : CALL_AUTH_ENROLL],
       wait: responseMode === 'detached' ? 'detached_enroll' : 'enroll_redirect',
     };
     this.rt.writeRun(runId, run);
@@ -494,7 +488,7 @@ export class IdentityHandler {
 
     const accessToken = tokens.access_token ?? '';
     if (accessToken !== '') {
-      run.calls = addCall(run.calls, this.idwBuildCall(idStr));
+      run.calls = addCall(run.calls, CALL_IDW_BUILD);
       const oauth = this.oauthClientFor(idStr);
       run.calls = addCall(run.calls, CALL_OIDC_USERINFO);
       try {
@@ -524,36 +518,16 @@ export class IdentityHandler {
   // ── SDK / OIDC client builders — built from the persisted config FILE ─────
 
   /**
-   * Build the OAuth client OFF the scenario's config file via the idw file constructor. The named
-   * OAuthClient.fromConfig() is used for the default (deployed) authorize base; a non-default base
-   * (local-stack option) still loads Config from the file via Config.fromIdwFile, only supplying the
-   * alternate base the wrapper cannot set. `pollTimeoutMs` bounds the HTTP network wait for the
-   * short-cycled polls so one blackholed request cannot pin the single worker.
+   * Build the OAuth client OFF the scenario's config file via the idw file constructor; the sign-in
+   * address is the file's `authorize_url` when present, else the SDK's live default. `pollTimeoutMs`
+   * bounds the HTTP network wait for the short-cycled polls so one blackholed request cannot pin the
+   * single worker.
    */
   private oauthClientFor(idStr: string, pollTimeoutMs?: number): OAuthClient {
     const path = this.rt.configPathFor(idStr);
     const opts: OAuthClientOptions = {};
     if (pollTimeoutMs !== undefined) opts.transport = new TimeoutTransport(pollTimeoutMs);
-    if (this.usesDefaultAuthorizeBase(idStr)) {
-      return OAuthClient.fromConfig(path, opts);
-    }
-    opts.authorizeUrl = str(this.rt.readConfigMeta(idStr).authorize_base);
-    return new OAuthClient(Config.fromIdwFile(path), opts);
-  }
-
-  /**
-   * Whether `oauthClientFor` takes the named-constructor branch. The SAME predicate decides the client AND
-   * the trace entry, so the panel can never name a constructor that did not run — the local-stack
-   * option really does build the client a different way.
-   */
-  private usesDefaultAuthorizeBase(idStr: string): boolean {
-    const base = str(this.rt.readConfigMeta(idStr).authorize_base);
-    return base === '' || base === DEFAULT_AUTHORIZE_URL;
-  }
-
-  /** The trace entry for the OAuth client `oauthClientFor` just built. */
-  private idwBuildCall(idStr: string): string {
-    return this.usesDefaultAuthorizeBase(idStr) ? CALL_IDW_BUILD : CALL_IDW_BUILD_LOCAL;
+    return OAuthClient.fromConfig(path, opts);
   }
 
   /** Build the service data client OFF the scenario's config file (service role). */

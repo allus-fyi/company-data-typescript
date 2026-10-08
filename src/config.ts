@@ -34,6 +34,7 @@ const ENV_MAP: Record<string, string> = {
   oauthClientSecret: 'ALLUS_OAUTH_CLIENT_SECRET',
   oauthPrivateKey: 'ALLUS_OAUTH_PRIVATE_KEY',
   oauthKeyPassphrase: 'ALLUS_OAUTH_KEY_PASSPHRASE',
+  authorizeUrl: 'ALLUS_AUTHORIZE_URL',
   cacheDir: 'ALLUS_CACHE_DIR',
   format: 'ALLUS_FORMAT',
 };
@@ -54,6 +55,7 @@ const FILE_KEY: Record<string, string> = {
   oauthClientSecret: 'oauth_client_secret',
   oauthPrivateKey: 'oauth_private_key',
   oauthKeyPassphrase: 'oauth_key_passphrase',
+  authorizeUrl: 'authorize_url',
   cacheDir: 'cache_dir',
   format: 'format',
 };
@@ -102,6 +104,7 @@ interface ConfigInit {
   oauthClientSecret?: string | null;
   oauthPrivateKey?: string | null;
   oauthKeyPassphrase?: string | null;
+  authorizeUrl?: string | null;
   webhooks?: Record<string, string>;
   webhookBearerToken?: string | null;
   webhookBasic?: WebhookBasic | null;
@@ -134,6 +137,8 @@ export class Config {
   readonly oauthClientSecret: string | null;
   readonly oauthPrivateKey: string | null;
   readonly oauthKeyPassphrase: string | null;
+  /** The hosted sign-in page the OAuth role builds its link on; null means the live address. */
+  readonly authorizeUrl: string | null;
 
   // OPTIONAL — per-webhook HMAC secrets keyed by webhook id; matched via the
   // X-Allus-Webhook-Id header. A single-webhook service can use the flat
@@ -173,6 +178,7 @@ export class Config {
     this.oauthClientSecret = init.oauthClientSecret ?? null;
     this.oauthPrivateKey = init.oauthPrivateKey ?? null;
     this.oauthKeyPassphrase = init.oauthKeyPassphrase ?? null;
+    this.authorizeUrl = init.authorizeUrl ?? null;
     this.webhooks = init.webhooks ?? {};
     this.webhookBearerToken = init.webhookBearerToken ?? null;
     this.webhookBasic = init.webhookBasic ?? null;
@@ -383,6 +389,8 @@ export class Config {
       oauthClientSecret: values['oauthClientSecret'] !== undefined ? String(values['oauthClientSecret']) : null,
       oauthPrivateKey: values['oauthPrivateKey'] !== undefined ? String(values['oauthPrivateKey']) : null,
       oauthKeyPassphrase: values['oauthKeyPassphrase'] !== undefined ? String(values['oauthKeyPassphrase']) : null,
+      authorizeUrl:
+        values['authorizeUrl'] !== undefined && values['authorizeUrl'] !== '' ? String(values['authorizeUrl']) : null,
       webhooks: hasWebhooks ? webhooks : {},
       webhookBearerToken,
       webhookBasic,

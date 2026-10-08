@@ -26,7 +26,7 @@ import { join } from 'node:path';
  *   - config/{sid}.json       — the canonical SDK config file a scenario runs OFF (written by
  *                               POST /api/scenarios/{id}/config from the browser settings; NOT TTL-swept)
  *   - config/{sid}.meta.json  — demo-only run parameters that are not SDK Config fields (identity's
- *                               authorizeBase / one_time claims / shareCode; flow's flow_id / connection_id
+ *                               one_time claims / shareCode; flow's flow_id / connection_id
  *                               / fixture; company-data's documents share_code / webhook id)
  *   - config/keys/<sha1>.pem  — the private-key file(s) a config references by path (mode 0600)
  *   - runs/{runId}.json       — one run's PKCE/state/nonce/outcome or accumulated result + calls

@@ -177,7 +177,7 @@ export class OAuthClient {
     this.config = config;
     this.transport = opts.transport ?? new FetchTransport();
     this.apiUrl = config.apiUrl.replace(/\/+$/, '');
-    this.authorizeBase = opts.authorizeUrl ?? DEFAULT_AUTHORIZE_URL;
+    this.authorizeBase = opts.authorizeUrl ?? config.authorizeUrl ?? DEFAULT_AUTHORIZE_URL;
     this.sleep = opts.sleep ?? defaultSleep;
   }
 
