@@ -31,6 +31,7 @@ export type {
   CustomerConnection,
   CustomerServiceLink,
   TypedAnswer,
+  KeptAnswer,
   FlowParty,
 } from './customer.js';
 

@@ -128,6 +128,16 @@ export interface TypedAnswer {
   kind?: 'typed' | 'one_time';
 }
 
+/**
+ * An edit decision that keeps a request row's stored answer as it is. It carries no value, and the
+ * API accepts it only for a row that holds an answer now. An edit replaces the whole answer set,
+ * so a row the edit sends nothing for is withdrawn.
+ */
+export interface KeptAnswer {
+  request_field_id: string;
+  kind: 'keep';
+}
+
 /** A flow party for {@link CustomerClient.encryptFlowAnswer}. */
 export interface FlowParty {
   user_id: string;
@@ -254,7 +264,7 @@ export class CustomerClient {
   async editAnswers(
     connectionId: string,
     serviceLinkId: string,
-    answers: TypedAnswer[],
+    answers: Array<TypedAnswer | KeptAnswer>,
     opts: { companyCode: string; serviceCode: string },
   ): Promise<unknown> {
     const decisions = await this.encryptTyped(answers, opts.companyCode, opts.serviceCode);
@@ -743,7 +753,7 @@ export class CustomerClient {
   }
 
   private async encryptTyped(
-    answers: TypedAnswer[],
+    answers: Array<TypedAnswer | KeptAnswer>,
     companyCode: string,
     serviceCode: string,
   ): Promise<Record<string, unknown>[]> {
@@ -755,6 +765,8 @@ export class CustomerClient {
     const types = await this.requestFieldTypes(companyCode, serviceCode);
     const registry = await this.fieldTypes();
     return answers.map((a) => {
+      // A kept row carries no value: nothing to validate or encrypt.
+      if (a.kind === 'keep') return { request_field_id: a.request_field_id, kind: 'keep' };
       const plain = String(a.value);
       const ft = types[a.request_field_id];
       if (ft && !registry.isFieldValueValid(ft, plain)) {
