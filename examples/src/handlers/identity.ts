@@ -2,6 +2,7 @@ import type { ServerResponse } from 'node:http';
 
 import {
   ApiError,
+  AuthError,
   Client,
   ConfigError,
   Connection,
@@ -367,20 +368,20 @@ export class IdentityHandler {
 
   /**
    * Short-cycled advance for a pending run awaiting a detached / challenge outcome. ONE SDK wait with
-   * timeout=2 per poll; an SDK logical timeout is treated as still-pending. Clients are rebuilt from the
+   * timeout=2 per poll; a poll that got no HTTP response, or a 503, stays pending. Clients are rebuilt from the
    * run's scenario config file — the run stores no credentials.
    */
   private async advance(run: RunRecord, host: string): Promise<RunRecord> {
     const wait = run.wait as string | undefined;
     const id = Number(run.scenario ?? 0);
     const idStr = String(id);
+    let signinCode = '';
     try {
       if (wait === 'detached_signin') {
         run.calls = addCall(run.calls, CALL_POLL_SIGNIN);
         const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
         const body = await oauth.pollResult(String(run.state), { timeout: 2, interval: 2 });
-        const code = str(body.code);
-        if (code !== '') await this.completeSignin(run, code, id);
+        signinCode = str(body.code);
       } else if (wait === 'detached_enroll') {
         run.calls = addCall(run.calls, CALL_POLL_ENROLL);
         const oauth = this.oauthClientFor(idStr, POLL_TIMEOUT_MS);
@@ -398,14 +399,34 @@ export class IdentityHandler {
       }
       // else (redirect / continue-on-phone flows): completion arrives via /callback — stay pending.
     } catch (e) {
-      // The SDK poll helpers signal a LOGICAL "not completed within Ns" timeout as ApiError(0) with that
-      // exact sentinel message. A real transport failure surfaces differently (an aborted fetch, or a
-      // non-sentinel ApiError) → a failed run. Only the logical timeout is "still pending".
-      if (e instanceof ApiError && e.status === 0 && e.message.includes('not completed within')) {
-        return run; // logical short-cycle timeout → still pending
+      // A poll that never received an HTTP response leaves the run pending; the next browser poll
+      // retries. That is: the SDK's logical "not completed within" timeout and any other ApiError(0)
+      // (the data client wraps a transport failure that way), an AuthError whose token request failed
+      // before any response, and — from the OAuth poll, which passes the transport's own error through —
+      // an aborted/timed-out or refused fetch. A 503 is pending too. Any other error is an answer
+      // another poll cannot change.
+      const err = e as Error;
+      if (
+        (e instanceof ApiError && (e.status === 0 || e.status === 503)) ||
+        (e instanceof AuthError && e.message.startsWith('token request failed:')) ||
+        err.name === 'TimeoutError' ||
+        err.name === 'AbortError' ||
+        (e instanceof TypeError && err.message === 'fetch failed')
+      ) {
+        return run;
       }
       run.status = 'failed';
       run.error = (e as Error).message;
+    }
+    // The delivered code is one-shot, so completing the sign-in is outside the retry rule above: a
+    // failure here ends the run instead of re-polling a result that is already consumed.
+    if (signinCode !== '') {
+      try {
+        await this.completeSignin(run, signinCode, id);
+      } catch (e) {
+        run.status = 'failed';
+        run.error = (e as Error).message;
+      }
     }
     return run;
   }
