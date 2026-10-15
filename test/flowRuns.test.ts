@@ -157,17 +157,21 @@ test('triggerFlowRun posts target+bindings+flow_version, parses FlowRun', async 
   });
 });
 
-test('flowRuns defaults to awaiting_company', async () => {
+test('flowRuns defaults to awaiting_company and reads every page', async () => {
   await withTmp(async (dir) => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
     const router: Router = (url, params) => {
       assert.ok(url.endsWith('/company-data/flow-runs'));
-      assert.deepEqual(params, { status: 'awaiting_company' });
-      return new FakeResponse(200, { total: 1, items: [runObj()] });
+      seen.push(params as Record<string, unknown> | undefined);
+      const p = (params ?? {}) as Record<string, unknown>;
+      return new FakeResponse(200, { items: [runObj()], next: p['after'] === undefined ? 'm1' : null });
     };
     const client = makeClientRw(makeConfig(dir), router, () => new FakeResponse(200, {}));
     const runs = await client.flowRuns();
-    assert.equal(runs.length, 1);
+    assert.equal(runs.length, 2);
     assert.equal(runs[0].status, 'awaiting_company');
+    assert.deepEqual(seen.map((p) => p?.['after']), [undefined, 'm1']);
+    assert.ok(seen.every((p) => p?.['status'] === 'awaiting_company'));
   });
 });
 

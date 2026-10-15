@@ -5,9 +5,9 @@
  * live there and nowhere else), then call:
  *
  *     client.requestFields()              -> Promise<RequestField[]>  (slug -> meta, cached)
- *     client.connections(limit, offset)   -> AsyncIterable<Connection> (auto-paged, lazy)
+ *     client.connections(limit)           -> AsyncIterable<Connection> (auto-paged, lazy)
  *     client.connection(id)               -> Promise<Connection>
- *     client.logs(limit, offset)          -> Promise<LogEntry[]>
+ *     client.logs(limit)                  -> AsyncIterable<LogEntry> (auto-paged, lazy)
  *     client.processChanges(handler, opts) -> Promise<void>  (the crash-safe pump)
  *     client.drainBatch(max)              -> Promise<Change[]>  (raw unbuffered drain — advanced)
  *     client.deadLetters() / client.retryDeadLetters(handler)
@@ -105,6 +105,9 @@ const KEYS = '/api/keys';
 // rate-limited, so we keep pages reasonably large to minimize the
 // number of requests for a full sync, while the iterator stays lazy.
 const DEFAULT_CONN_PAGE = 100;
+
+/** Page size flowRuns() reads the run list with (the list's maximum). */
+const FLOW_RUN_PAGE = 500;
 
 type Json = Record<string, unknown>;
 
@@ -456,12 +459,11 @@ export class Client {
   /**
    * A lazy async generator paging the list endpoint, yielding one Connection at a time.
    *
-   * `limit` is the page size; `offset` the starting offset. The generator auto-pages
-   * `GET /api/company-data/connections?limit&offset` and yields typed
-   * {@link Connection} objects (each `values[slug]` already decrypted / a lazy binary
-   * handle) one at a time — bounded memory for a large book. It honors the response's
-   * `total` (when present) so it never over-fetches a page past the end, and also
-   * stops on a short page as a fallback.
+   * `limit` is the page size. The generator pages `GET /api/company-data/connections` with its
+   * cursor — each page's `next` marker is sent back as `after` until a page answers none — and
+   * yields typed {@link Connection} objects (each `values[slug]` already decrypted / a lazy binary
+   * handle) one at a time — bounded memory for a large book. A page is fetched only once the
+   * previous one has been consumed.
    *
    * The connections endpoints are **heavily rate-limited**: use this
    * for the initial full sync + occasional reconciliation, never as a poll substitute
@@ -469,20 +471,15 @@ export class Client {
    * per `Retry-After` and retries the page a bounded number of times before
    * re-throwing — so it paces itself within the limit rather than hammering.
    */
-  async *connections(limit: number = DEFAULT_CONN_PAGE, offset: number = 0): AsyncGenerator<Connection> {
+  async *connections(limit: number = DEFAULT_CONN_PAGE): AsyncGenerator<Connection> {
     const page = Math.max(1, Math.trunc(limit));
-    let cur = Math.max(0, Math.trunc(offset));
     // Hold the catalog and a registry that carries its types before any value is typed.
     await this.prepareTyping();
 
-    let total: number | null = null;
+    let after: string | null = null;
     for (;;) {
-      const body = await this.getConnectionsPage(page, cur);
-      total = readTotal(body, total);
+      const body = await this.getConnectionsPage(page, after);
       const items = listItems(body);
-      if (items.length === 0) {
-        return;
-      }
       // The page is the payload: a slot it names that the held catalog does not carry is healed
       // here, before a factory reads that slug out of it.
       await this.ensureSlugsKnown(valueSlugs(items));
@@ -498,31 +495,23 @@ export class Client {
           identity: obj as Record<string, unknown>,
         });
       }
-      cur += items.length;
-      // Stop when we've consumed `total` rows (honor the API's total so we don't
-      // over-fetch a final empty/short page), or on a short page as a fallback.
-      if (total !== null && cur >= total) {
-        return;
-      }
-      if (items.length < page) {
-        return;
-      }
+      after = nextMarker(body);
+      if (after === null) return;
     }
   }
 
-  private async getConnectionsPage(page: number, offset: number): Promise<unknown> {
+  private async getConnectionsPage(page: number, after: string | null): Promise<unknown> {
+    const params: Record<string, string | number> = after === null ? { limit: page } : { limit: page, after };
     let attempts = 0;
     for (;;) {
       try {
-        return await this.http.get(CONNECTIONS, { limit: page, offset });
+        return await this.http.get(CONNECTIONS, params);
       } catch (exc) {
         if (!(exc instanceof RateLimitError)) throw exc;
         attempts += 1;
         if (attempts > CONN_MAX_429_BACKOFFS) throw exc;
         const delay = connBackoff(exc.retryAfter, attempts);
-        this.log.warn?.(
-          `connections rate-limited (offset=${offset}); backoff ${delay}s (attempt ${attempts})`,
-        );
+        this.log.warn?.(`connections rate-limited; backoff ${delay}s (attempt ${attempts})`);
         if (delay) await this.sleep(delay);
       }
     }
@@ -578,17 +567,24 @@ export class Client {
   // ── logs (moderate rate-limit) ──────────────────────────────────────────────
 
   /**
-   * The service's activity log → `LogEntry[]`.
+   * The service's activity log, newest first → a lazy async generator of {@link LogEntry}.
    *
-   * `GET /api/company-data/logs?limit&offset`. Ops events only (email / purge /
-   * webhook) — never person field data.
+   * Pages `GET /api/company-data/logs` with its cursor: `limit` is the page size (1–200), and each
+   * page's `next` marker is sent back as `after` until a page answers none. Ops events only
+   * (email / purge / webhook) — never person field data.
    */
-  async logs(limit: number = 50, offset: number = 0): Promise<LogEntry[]> {
-    const body = await this.http.get(LOGS, {
-      limit: Math.max(1, Math.trunc(limit)),
-      offset: Math.max(0, Math.trunc(offset)),
-    });
-    return LogEntry.listFromApi(body);
+  async *logs(limit: number = 50): AsyncGenerator<LogEntry> {
+    const params: Record<string, string | number> = { limit: Math.min(200, Math.max(1, Math.trunc(limit))) };
+    let after: string | null = null;
+    for (;;) {
+      const page: Record<string, string | number> = after === null ? params : { ...params, after };
+      const body = await this.http.get(LOGS, page);
+      for (const entry of LogEntry.listFromApi(body)) {
+        yield entry;
+      }
+      after = nextMarker(body);
+      if (after === null) return;
+    }
   }
 
   // ── changes feed — the crash-safe pump ──────────────────────────────────────
@@ -991,10 +987,8 @@ export class Client {
       for (const doc of Document.listFromApi(body, { decryptValue: this.decryptValue })) {
         yield doc;
       }
-      const next =
-        body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['next'] : undefined;
-      if (typeof next !== 'string' || next === '') return;
-      after = next;
+      after = nextMarker(body);
+      if (after === null) return;
     }
   }
 
@@ -1384,14 +1378,24 @@ export class Client {
   }
 
   /**
-   * List this service's runs. Default `awaiting_company` = the actionable queue.
-   * Pass `status: null` for all runs, or any status filter.
+   * List this service's runs, newest first. Default `awaiting_company` = the actionable queue.
+   * Pass `status: null` for all runs, or any status filter. Every page of
+   * `GET /api/company-data/flow-runs` is read, following its cursor (`next` sent back as `after`)
+   * until a page answers none.
    */
   async flowRuns(opts: { status?: string | null } = {}): Promise<FlowRun[]> {
     const status = opts.status === undefined ? 'awaiting_company' : opts.status;
-    const params = status ? { status } : undefined;
-    const body = await this.http.get(FLOW_RUNS, params);
-    return listItems(body).map((o) => FlowRun.fromApi(asJson(o)));
+    const runs: FlowRun[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const params: Record<string, string | number> = { limit: FLOW_RUN_PAGE };
+      if (status) params['status'] = status;
+      if (after !== null) params['after'] = after;
+      const body = await this.http.get(FLOW_RUNS, params);
+      for (const o of listItems(body)) runs.push(FlowRun.fromApi(asJson(o)));
+      after = nextMarker(body);
+      if (after === null) return runs;
+    }
   }
 
   /** Fetch one run by id → {@link FlowRun}. */
@@ -1964,7 +1968,7 @@ function broadcastOriginalName(
   return derived ? `${name}.${derived}` : name;
 }
 
-/** Pull the `items` array out of a `{total, items}` list response. */
+/** Pull the `items` array out of a `{items, next}` list response. */
 function listItems(body: unknown): unknown[] {
   if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
     const items = (body as Record<string, unknown>)['items'];
@@ -1997,16 +2001,14 @@ function changeSlugs(events: Record<string, unknown>[]): string[] {
   return out;
 }
 
-/** Read the `total` count out of a `{total, items}` list response (or keep the prior). */
-function readTotal(body: unknown, prior: number | null): number | null {
-  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
-    const t = (body as Record<string, unknown>)['total'];
-    if (t !== undefined && t !== null) {
-      const n = Number(t);
-      if (Number.isFinite(n)) return n;
-    }
-  }
-  return prior;
+/**
+ * A cursor-paged list response's `next` marker, or null on the last page. An empty string — what an
+ * XML response carries for a null `next` — is the last page too.
+ */
+function nextMarker(body: unknown): string | null {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const next = (body as Record<string, unknown>)['next'];
+  return typeof next === 'string' && next !== '' ? next : null;
 }
 
 /** Backoff before retrying a rate-limited connections page. */

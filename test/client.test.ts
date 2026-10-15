@@ -179,7 +179,6 @@ test('connections yields typed decrypted', async () => {
     const config = makeConfig(dir);
     const addrWrapper = encryptForKey(vector, JSON.stringify({ city: 'Utrecht', country: 'NL' }));
     const page1 = {
-      total: 1,
       items: [
         {
           connection_id: 'csc-1',
@@ -223,7 +222,7 @@ test('connections yields typed decrypted', async () => {
   });
 });
 
-test('connections auto-pages (honors total / short page)', async () => {
+test('connections follows the cursor (next sent back as after)', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const makeItem = (i: number): Record<string, unknown> => ({
@@ -233,8 +232,8 @@ test('connections auto-pages (honors total / short page)', async () => {
       values: {},
     });
     const pages = [
-      { total: 3, items: [makeItem(1), makeItem(2)] }, // full page (==limit 2)
-      { total: 3, items: [makeItem(3)] }, // short page → stop
+      { items: [makeItem(1), makeItem(2)], next: 'm1' },
+      { items: [makeItem(3)], next: null },
     ];
     let pageIdx = 0;
     const { client, transport } = makeClient(config, (url) => {
@@ -247,27 +246,27 @@ test('connections auto-pages (honors total / short page)', async () => {
     for await (const c of client.connections(2)) ids.push(c.id);
     assert.deepEqual(ids, ['c1', 'c2', 'c3']);
     const connGets = transport.gets.filter((g) => g.url.endsWith('/connections'));
-    assert.deepEqual(connGets.map((g) => g.params?.offset), [0, 2]);
+    assert.deepEqual(connGets.map((g) => g.params?.after), [undefined, 'm1']);
+    assert.ok(connGets.every((g) => g.params?.offset === undefined));
   });
 });
 
-test('connections stops at total without an extra fetch', async () => {
+test('connections stops on a page with no next marker', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const makeItem = (i: number): Record<string, unknown> => ({ connection_id: `c${i}`, user_id: `p${i}`, values: {} });
-    // total=2, page size 2, one full page that exactly covers `total` → must NOT
-    // fetch a second page (the over-fetch the task warns against).
+    // A full page whose `next` is null is the last page — no second fetch.
     const { client, transport } = makeClient(config, (url) => {
       if (url.endsWith('/api/contact-field-types')) return new FakeResponse(200, testFieldTypeRows());
       if (url.endsWith('/request-fields')) return new FakeResponse(200, { request_fields: [] });
-      if (url.endsWith('/connections')) return new FakeResponse(200, { total: 2, items: [makeItem(1), makeItem(2)] });
+      if (url.endsWith('/connections')) return new FakeResponse(200, { items: [makeItem(1), makeItem(2)], next: null });
       throw new Error('unexpected GET ' + url);
     });
     const ids: string[] = [];
     for await (const c of client.connections(2)) ids.push(c.id);
     assert.deepEqual(ids, ['c1', 'c2']);
     const connGets = transport.gets.filter((g) => g.url.endsWith('/connections'));
-    assert.equal(connGets.length, 1); // honored `total` — no over-fetch of a 2nd page
+    assert.equal(connGets.length, 1);
   });
 });
 
@@ -277,7 +276,6 @@ test('binary handle fetches slot and decrypts', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const page = {
-      total: 1,
       items: [
         {
           connection_id: 'csc-1',
@@ -316,7 +314,6 @@ test('binary handle serves plaintext bytes', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const page = {
-      total: 1,
       items: [
         {
           connection_id: 'csc-1',
@@ -391,7 +388,6 @@ test('binary handle expired answer carries digest', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
     const page = {
-      total: 1,
       items: [
         {
           connection_id: 'csc-1',
@@ -456,26 +452,32 @@ test('connection by id', async () => {
 
 // ── logs() ──────────────────────────────────────────────────────────────────
 
-test('logs deserialize', async () => {
+test('logs deserialize and follow the cursor', async () => {
   await withTmp(async (dir) => {
     const config = makeConfig(dir);
-    const body = {
-      total: 2,
-      items: [
-        { type: 'email', message: 'stale-queue alert', metadata: { days: 3 }, created_at: '2026-06-17T06:00:00Z' },
-        { type: 'purge', message: 'purged 4', metadata: { count: 4 }, created_at: '2026-06-17T07:00:00Z' },
-      ],
-    };
+    const pages = [
+      {
+        items: [{ type: 'email', message: 'stale-queue alert', metadata: { days: 3 }, created_at: '2026-06-17T06:00:00Z' }],
+        next: 'm1',
+      },
+      {
+        items: [{ type: 'purge', message: 'purged 4', metadata: { count: 4 }, created_at: '2026-06-17T07:00:00Z' }],
+        next: null,
+      },
+    ];
+    let pageIdx = 0;
     const { client, transport } = makeClient(config, (url) => {
-      if (url.endsWith('/logs')) return new FakeResponse(200, body);
+      if (url.endsWith('/logs')) return new FakeResponse(200, pages[pageIdx++]);
       throw new Error('unexpected GET ' + url);
     });
-    const logs = await client.logs(50);
+    const logs: LogEntry[] = [];
+    for await (const e of client.logs(50)) logs.push(e);
     assert.equal(logs.length, 2);
     assert.ok(logs.every((e) => e instanceof LogEntry));
     assert.equal(logs[0].type, 'email');
     assert.deepEqual(logs[0].metadata, { days: 3 });
     assert.equal(transport.gets[0].params?.limit, 50);
+    assert.deepEqual(transport.gets.map((g) => g.params?.after), [undefined, 'm1']);
   });
 });
 

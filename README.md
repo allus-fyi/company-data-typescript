@@ -202,19 +202,20 @@ for (const f of await client.requestFields()) {
 }
 ```
 
-### `connections(limit?, offset?)`
+### `connections(limit?)`
 
 ```ts
-connections(limit?: number, offset?: number): AsyncGenerator<Connection>
+connections(limit?: number): AsyncGenerator<Connection>
 ```
 
-A **lazy async generator** that auto-pages
-`GET /api/company-data/connections?limit&offset` and yields one typed `Connection`
-at a time (bounded memory for a large book). Each `conn.values[slug]` is already
-decrypted (or a lazy binary handle). It honors the response's `total` so it never
-over-fetches a page past the end (and also stops on a short page).
+A **lazy async generator** that pages `GET /api/company-data/connections`, newest
+connection first, following the list's cursor — each page's `next` marker is sent back
+as `after` until a page answers none — and yields one typed `Connection` at a time
+(bounded memory for a large book). A page is fetched only once the previous one has been
+consumed; a page costs the platform the same at any depth, and the list carries no total.
+Each `conn.values[slug]` is already decrypted (or a lazy binary handle).
 
-* **Params:** `limit` — page size (default 100); `offset` — starting offset.
+* **Params:** `limit` — page size (default 100, max 500).
 * **Returns:** `AsyncGenerator<Connection>` — consume with `for await`.
 * **Throws:** `AuthError`, `ApiError`, `RateLimitError` (after the iterator's bounded internal backoff — see [Rate limits](#rate-limits)).
 * **A value the service key cannot open never ends the listing.** It is returned in its own place with `value` `null` and `unreadable` `true` (see [`Value`](#value)), and every other value and connection is returned as usual. When every value of every connection reads `unreadable`, check the configured `service_private_key`.
@@ -264,21 +265,23 @@ End one of this service's connections (`DELETE /api/company-data/connections/{id
 await client.deleteConnection(connId);
 ```
 
-### `logs(limit?, offset?)`
+### `logs(limit?)`
 
 ```ts
-logs(limit?: number, offset?: number): Promise<LogEntry[]>
+logs(limit?: number): AsyncGenerator<LogEntry>
 ```
 
-The service's activity log (`GET /api/company-data/logs?limit&offset`) — **ops
-events only** (email / purge / webhook), never person field data.
+The service's activity log, newest first (`GET /api/company-data/logs`) — **ops
+events only** (email / purge / webhook), never person field data. A **lazy async
+generator** following the list's cursor (`next` sent back as `after`) until a page
+answers none.
 
-* **Params:** `limit` (default 50), `offset` (default 0).
-* **Returns:** `Promise<LogEntry[]>` — each `LogEntry { type, message, metadata, at, raw }`.
+* **Params:** `limit` — page size (default 50, max 200).
+* **Returns:** `AsyncGenerator<LogEntry>` — each `LogEntry { type, message, metadata, at, raw }`; consume with `for await`.
 * **Throws:** `AuthError`, `ApiError`, `RateLimitError`.
 
 ```ts
-for (const entry of await client.logs(20)) {
+for await (const entry of client.logs(20)) {
   console.log(entry.at, entry.type, entry.message);
 }
 ```

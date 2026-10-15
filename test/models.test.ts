@@ -196,7 +196,6 @@ test('change consent event has slug, no value', () => {
 
 test('log entries parsed', () => {
   const body = {
-    total: 2,
     items: [
       { type: 'email', message: 'stale-queue alert', metadata: { days: 3 }, at: '2026-06-17T06:00:00Z' },
       { type: 'purge', message: 'purged 4 changes', metadata: { count: 4 }, created_at: '2026-06-17T07:00:00Z' },
