@@ -881,7 +881,7 @@ optional for any other, ignored for `payloadKind='json'`.
 ### List, fetch, update, delete
 
 ```ts
-listDocuments(opts?: { personUserId?; status?; limit?; offset? }): Promise<Document[]>
+listDocuments(opts?: { personUserId?; status?; limit? }): AsyncGenerator<Document>
 document(documentId): Promise<Document>
 documentFile(documentId): Promise<Buffer>                       // #491: the file BYTES
 updateDocumentStatus(documentId, status): Promise<Document>     // offering|ready_to_sign|active|active_but_ending|ended
@@ -890,7 +890,9 @@ deleteDocument(documentId): Promise<void>                       // also removes 
 ```
 
 ```ts
-const docs = await client.listDocuments({ personUserId: 'person-uuid', status: 'active' });
+for await (const d of client.listDocuments({ personUserId: 'person-uuid', status: 'active' })) {
+  console.log(d.id, d.name, d.status);
+}
 const doc = await client.document(contract.id);
 const payload = doc.json();                          // decrypted plaintext (per-person) or as-is (broadcast)
 
@@ -919,7 +921,7 @@ additionally carries `plain_sha256`, `signer_first_name`, `signer_last_name` and
 `signer_name_verified` beside its existing `action`/`method`/`content_sha256`/
 `ip`/`user_agent`/`created_at` keys.
 
-* `listDocuments(opts)` filters optionally by `personUserId` and/or `status` and pages with `limit`/`offset`.
+* `listDocuments(opts)` yields every document of the service, newest first, filtered optionally by `personUserId` and/or `status`. It is a lazy async generator over `GET /api/company-data/documents`'s cursor: `limit` is the page size (1–500), each page's `next` marker is sent back as `after`, and the next page is fetched only once this one is consumed.
 * `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).
 * A contract-flow-generated document can also read `waiting` — a run-participant copy whose signer has not been reached yet in the run's signing line. It is read-only: `updateDocumentStatus` throws (`error_key: 'documents.run_managed'`, 409) if you try to write `status` on a run-participant document while it is `waiting`, `ready_to_sign` or `offering` — that status moves only through flow generation, the run's own advance, sign/accept, or a run cancel/decline. Such a document's `runSignatures` carries the WHOLE run's signing line — one entry per (output document, participant), in line order, each `{output_key, name, party_key, document_id, position, status, action, acted_at}`; every document of the run carries the same summary.
 * `documentFile(id)` downloads a `'file'` document's BYTES — the metadata methods don't include them. A **broadcast** (plaintext) document's bytes are returned as-is; a **per-person / private** document is encrypted to the *recipient's* key (not your service key), so `documentFile` fails clearly with `documents.recipient_encrypted` (`ApiError`) rather than a doomed decrypt. For a generated flow document's own copy use `flowRunDocument(runId, outputKey)` below (that copy IS service-key-encrypted).

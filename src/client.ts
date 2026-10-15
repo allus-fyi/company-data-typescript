@@ -971,19 +971,31 @@ export class Client {
   }
 
   /**
-   * List this service's documents → `Document[]` (paged; optional person/status filter).
+   * Every document of this service, newest first → a lazy `AsyncGenerator<Document>` (optional
+   * person/status filter). Pages `GET /api/company-data/documents` with its cursor: `limit` is the
+   * page size (1–500), and each page's `next` marker is sent back as `after` until a page answers
+   * none. A page is fetched only once the previous one has been consumed.
    */
-  async listDocuments(
-    opts: { personUserId?: string; status?: string; limit?: number; offset?: number } = {},
-  ): Promise<Document[]> {
+  async *listDocuments(
+    opts: { personUserId?: string; status?: string; limit?: number } = {},
+  ): AsyncGenerator<Document> {
     const params: Record<string, string | number> = {
-      limit: Math.max(1, Math.trunc(opts.limit ?? 100)),
-      offset: Math.max(0, Math.trunc(opts.offset ?? 0)),
+      limit: Math.min(500, Math.max(1, Math.trunc(opts.limit ?? 100))),
     };
     if (opts.personUserId) params['person_user_id'] = opts.personUserId;
     if (opts.status) params['status'] = opts.status;
-    const body = await this.http.get(DOCUMENTS, params);
-    return Document.listFromApi(body, { decryptValue: this.decryptValue });
+    let after: string | null = null;
+    for (;;) {
+      const page: Record<string, string | number> = after ? { ...params, after } : params;
+      const body = await this.http.get(DOCUMENTS, page);
+      for (const doc of Document.listFromApi(body, { decryptValue: this.decryptValue })) {
+        yield doc;
+      }
+      const next =
+        body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['next'] : undefined;
+      if (typeof next !== 'string' || next === '') return;
+      after = next;
+    }
   }
 
   /** Fetch one document by id → {@link Document}. */

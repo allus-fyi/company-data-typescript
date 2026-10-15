@@ -878,7 +878,7 @@ test('document verbs hit the right verb + path', async () => {
     const { client } = makeClientRw(
       config,
       (url) => {
-        if (url.endsWith('/documents')) return new FakeResponse(200, { total: 0, items: [] });
+        if (url.endsWith('/documents')) return new FakeResponse(200, { items: [], next: null });
         if (url.includes('/documents/d9')) {
           return new FakeResponse(200, { id: 'd9', payload_kind: 'json', is_private: false, value: { a: 1 } });
         }
@@ -891,7 +891,9 @@ test('document verbs hit the right verb + path', async () => {
         });
       },
     );
-    assert.deepEqual(await client.listDocuments({ status: 'active' }), []);
+    const listed: unknown[] = [];
+    for await (const doc of client.listDocuments({ status: 'active' })) listed.push(doc);
+    assert.deepEqual(listed, []);
     assert.equal((await client.document('d9')).id, 'd9');
     await client.updateDocumentStatus('d9', 'ended');
     await client.updateDocumentMetadata('d9', { name: 'renamed' });
