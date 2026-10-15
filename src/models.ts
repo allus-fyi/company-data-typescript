@@ -562,13 +562,16 @@ export class Change {
     readonly slug: string | null,
     readonly value: unknown,
     readonly live: boolean | null,
-    /** Set on `document_status_changed` — the affected document's id. */
+    /** Set on `document_status_changed` and `document_sealed` — the affected document's id. */
     readonly documentId: string | null,
     /** Set on `document_status_changed` — the document's new lifecycle status. */
     readonly status: string | null,
     /** Set on `document_status_changed` for a contract — signed | accepted | cancelled (else null). */
     readonly action: string | null,
-    /** Set on `document_status_changed` — the person's optional cancellation note (else null). */
+    /**
+     * Set on `document_status_changed` — the person's optional cancellation note, decrypted from
+     * service-key ciphertext (else null).
+     */
     readonly note: string | null,
     /** Set on a signature — sign method: biometric | twofa | email | custodian (else null). */
     readonly method: string | null,
@@ -578,11 +581,14 @@ export class Change {
     readonly signedAt: string | null,
     /** Set on a cancelled `document_status_changed` — ISO date the cancellation takes effect (else null). */
     readonly cancelEffectiveDate: string | null,
-    /** Set on `document_status_changed` — when the platform seal was applied (else null until sealed). */
+    /** Set on `document_sealed` — when the platform seal was applied (else null). */
     readonly sealedAt: string | null,
-    /** Set on `document_status_changed` — SHA-256 of the document's unencrypted PDF bytes (else null on a JSON contract). */
+    /** Set on `document_sealed` — SHA-256 of the document's unencrypted PDF bytes, lowercase hex (else null). */
     readonly plainSha256: string | null,
-    /** Set on `document_status_changed` — the signature's own signer evidence (else null). */
+    /**
+     * Set on `document_status_changed` — the signature's own signer evidence, each name decrypted
+     * from service-key ciphertext (else null).
+     */
     readonly signerFirstName: string | null,
     readonly signerLastName: string | null,
     /** True iff the submitted name matched the signer's verified ID name; null when unset. */
@@ -662,6 +668,18 @@ export class Change {
       }
     }
 
+    // A `document_status_changed` carries the signer names and the note as service-key
+    // ciphertext; the ordinary decrypt opens each, exactly as it opens a message body. An
+    // absent, null or empty member (XML renders null as an empty element) reads null.
+    const isDocStatus = event === 'document_status_changed';
+    const decryptDocText = (cipher: unknown): string | null =>
+      isDocStatus && cipher !== undefined && cipher !== null && cipher !== ''
+        ? opts.decryptValue(cipher as EncWrapper | string)
+        : null;
+    const note = decryptDocText(obj['note']);
+    const signerFirstName = decryptDocText(obj['signer_first_name']);
+    const signerLastName = decryptDocText(obj['signer_last_name']);
+
     const personIdRaw = obj['person_user_id'] ?? obj['person_id'];
     const shareCodeRaw = obj['share_code'];
     const documentIdRaw = obj['document_id'];
@@ -670,15 +688,12 @@ export class Change {
     const statusRaw =
       event === 'document_status_changed' || event === '2fa_challenge_completed' ? obj['status'] : null;
     const actionRaw = event === 'document_status_changed' ? obj['action'] : null;
-    const noteRaw = event === 'document_status_changed' ? obj['note'] : null;
     const methodRaw = event === 'document_status_changed' ? obj['method'] : null;
     const contentSha256Raw = event === 'document_status_changed' ? obj['content_sha256'] : null;
     const signedAtRaw = event === 'document_status_changed' ? obj['signed_at'] : null;
     const cancelEffectiveDateRaw = event === 'document_status_changed' ? obj['cancel_effective_date'] : null;
-    const sealedAtRaw = event === 'document_status_changed' ? obj['sealed_at'] : null;
-    const plainSha256Raw = event === 'document_status_changed' ? obj['plain_sha256'] : null;
-    const signerFirstNameRaw = event === 'document_status_changed' ? obj['signer_first_name'] : null;
-    const signerLastNameRaw = event === 'document_status_changed' ? obj['signer_last_name'] : null;
+    const sealedAtRaw = event === 'document_sealed' ? obj['sealed_at'] : null;
+    const plainSha256Raw = event === 'document_sealed' ? obj['plain_sha256'] : null;
     const signerNameVerifiedRaw = event === 'document_status_changed' ? obj['signer_name_verified'] : null;
     const requestIdRaw =
       event === 'connection_request_accepted' || event === 'connection_request_rejected'
@@ -695,15 +710,15 @@ export class Change {
       documentIdRaw != null ? String(documentIdRaw) : null,
       statusRaw != null ? String(statusRaw) : null,
       actionRaw != null ? String(actionRaw) : null,
-      noteRaw != null ? String(noteRaw) : null,
+      note,
       methodRaw != null ? String(methodRaw) : null,
       contentSha256Raw != null ? String(contentSha256Raw) : null,
       signedAtRaw != null ? String(signedAtRaw) : null,
       cancelEffectiveDateRaw != null ? String(cancelEffectiveDateRaw) : null,
       sealedAtRaw != null ? String(sealedAtRaw) : null,
       plainSha256Raw != null ? String(plainSha256Raw) : null,
-      signerFirstNameRaw != null ? String(signerFirstNameRaw) : null,
-      signerLastNameRaw != null ? String(signerLastNameRaw) : null,
+      signerFirstName,
+      signerLastName,
       signerNameVerifiedRaw != null ? coerceBool(signerNameVerifiedRaw) : null,
       requestIdRaw != null ? String(requestIdRaw) : null,
       obj['customer_type'] != null ? String(obj['customer_type']) : null,

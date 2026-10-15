@@ -595,11 +595,12 @@ A change-feed / webhook event.
 | Property | Meaning |
 |----------|---------|
 | `id` | **The stable server change-row id — your dedup key** (captured before the server delete). |
-| `event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`, `document_status_changed`, `message_received`. |
+| `event` | `connection_created`, `connection_deleted`, `field_updated`, `field_deleted`, `consent_accepted`, `consent_declined`, `document_status_changed`, `document_sealed`, `message_received`. |
 | `personId` | The person the change is about (may be `null`). |
 | `slug`, `value`, `live` | Present only on `field_updated`; `value` is typed exactly like `Value.value` (incl. a lazy `BinaryHandle` for binaries). Connection/consent/document events carry no slot/value. |
-| `documentId`, `status` | Present only on `document_status_changed` — the affected document's id and its new lifecycle status. `null` on every other event. |
-| `sealedAt`, `plainSha256`, `signerFirstName`, `signerLastName`, `signerNameVerified` | Present on a `document_status_changed` transition to `active` — the same seal state the document read carries, so a webhook or pump consumer never needs a follow-up `document(id)` call to learn a run sealed. `null` otherwise. |
+| `documentId`, `status` | `documentId` is present on `document_status_changed` and `document_sealed` — the affected document's id; `status` is present only on `document_status_changed` — its new lifecycle status. `null` on every other event. |
+| `signerFirstName`, `signerLastName`, `signerNameVerified`, `note` | Present on `document_status_changed`. The signer names and the note arrive encrypted to your service key; the SDK decrypts them, so these read as plaintext. `signerNameVerified` arrives as a readable boolean. `null` otherwise. |
+| `sealedAt`, `plainSha256` | Present only on `document_sealed` — emitted when the platform seals a file document (never for a JSON contract): when the seal was applied and the SHA-256 of the document's unencrypted PDF bytes (lowercase hex). A webhook receives it when it subscribes to `document_sealed` or has an empty event filter (every event); subscribing to `document_status_changed` alone does not deliver it. `null` on every other event. |
 | `connectionId`, `messageId`, `personPublicKey`, `messageBody` | Present only on `message_received` — a person messaged your service. `messageBody` is the **decrypted** text. See [Messaging](#messaging). |
 | `verified`, `verifiedAt`, `verifiedExpiresAt` | Present on `field_updated`, with the same meaning as on `Value`. |
 | `verifiedMethod`, `verifiedProvider`, `verificationId` | The proof metadata, same meaning and same all-or-none rule as on `Value`. |
@@ -919,7 +920,8 @@ the SHA-256 of the document's unencrypted PDF bytes (`null` on a json document,
 and on a file document with no stored plaintext hash). Each `doc.signatures` entry
 additionally carries `plain_sha256`, `signer_first_name`, `signer_last_name` and
 `signer_name_verified` beside its existing `action`/`method`/`content_sha256`/
-`ip`/`user_agent`/`created_at` keys.
+`ip`/`user_agent`/`created_at` keys. A successful seal of a file document raises a
+`document_sealed` change event carrying `documentId`, `sealedAt` and `plainSha256`.
 
 * `listDocuments(opts)` yields every document of the service, newest first, filtered optionally by `personUserId` and/or `status`. It is a lazy async generator over `GET /api/company-data/documents`'s cursor: `limit` is the page size (1–500), each page's `next` marker is sent back as `after`, and the next page is fetched only once this one is consumed.
 * `document(id)` fetches one. Call `.json()` on a `'json'` document to get the plaintext (it transparently decrypts a per-person, encrypted document; a broadcast doc is already plaintext).
@@ -1118,13 +1120,18 @@ slugs. The math ops include variadic `max` and `min`, which skip what is not a n
 
 When a recipient acts on a document (e.g. signs it), the feed emits a
 `document_status_changed` event. The `Change` carries `documentId` and the new
-`status` (other change events leave both `null`):
+`status` (other change events leave `status` `null`); the signer names and note it
+carries are decrypted from service-key ciphertext for you. A seal of a file document
+raises a separate `document_sealed` event carrying `documentId`, `sealedAt` and
+`plainSha256`:
 
 ```ts
 async function handle(change) {
   if (await alreadyProcessed(change.id)) return;     // idempotency
   if (change.event === 'document_status_changed') {
     await onDocumentStatus(change.documentId, change.status);   // e.g. 'active'
+  } else if (change.event === 'document_sealed') {
+    await onDocumentSealed(change.documentId, change.sealedAt, change.plainSha256);
   } else if (change.event === 'field_updated') {
     await store(change.personId, change.slug, change.value);
   }

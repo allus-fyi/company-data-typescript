@@ -328,7 +328,7 @@ test('change document_status_changed carries note on a cancellation', () => {
         event: 'document_status_changed',
         person_user_id: 'u-3',
         action: 'cancelled',
-        note: 'Too expensive',
+        note: JSON.stringify(encryptWithVectorPub('Too expensive')),
         document_id: 'doc-5',
         status: 'ended',
         at: '2026-06-22T10:00:00Z',

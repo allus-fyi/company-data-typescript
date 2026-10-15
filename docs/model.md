@@ -218,9 +218,11 @@ class Change {
 | `field_updated` | `slug` + decrypted `value` (+ `live`); binary → a lazy `BinaryHandle` |
 | `field_deleted` | `slug`, no value |
 | `consent_accepted` / `consent_declined` | `slug` |
+| `document_status_changed` | `documentId`, `status`, `action`, `method`, `contentSha256`, `signedAt`, `cancelEffectiveDate`, `signerNameVerified`, plus `signerFirstName`, `signerLastName` and `note` — those three arrive encrypted to the service key and the SDK decrypts them; no slot |
+| `document_sealed` | `documentId`, `sealedAt`, `plainSha256` (lowercase hex); no slot. Emitted when the platform seals a file document, never for a JSON contract. A webhook receives it only when subscribed to `document_sealed` (or has an empty event filter, which receives every event) |
 | `message_received` | `connectionId`, `messageId`, `personPublicKey` + `messageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
 
-The event's ciphertext is carried under `body`. It is never `value`: on every other
+A `message_received` event's ciphertext is carried under `body`. It is never `value`: on every other
 event `value` means field ciphertext, and a message body is not one.
 
 **Answering one.** `sendMessage` answers **201** with the created message carrying
