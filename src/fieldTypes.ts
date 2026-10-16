@@ -103,6 +103,7 @@ export interface FieldTypeRow {
   fields?: SubFieldEntry[] | null;
   validation?: string | null;
   is_system?: boolean | null;
+  system_only?: boolean | null;
 }
 
 /** One sub-field entry of a `composite`, `file` or `pages` type. */
@@ -121,6 +122,8 @@ export interface ResolvedFieldType {
   parent: string | null;
   label: string;
   is_system: boolean;
+  /** Written by the platform alone: read off the type's own row, never inherited. */
+  system_only: boolean;
   known: boolean;
   input: string | null;
   lane: string | null;
@@ -353,6 +356,7 @@ export class FieldTypeRegistry {
         parent: null,
         label: type,
         is_system: false,
+        system_only: false,
         known: false,
         input: null,
         lane: null,
@@ -380,6 +384,7 @@ export class FieldTypeRegistry {
       parent: row.parent ?? null,
       label: row.label ?? type,
       is_system: Boolean(row.is_system),
+      system_only: Boolean(row.system_only),
       known: true,
       input: null,
       lane: null,
@@ -490,14 +495,23 @@ export class FieldTypeRegistry {
     return null;
   }
 
-  /** The types a contact field, a service request row or an admin field may declare. */
+  /**
+   * The types a contact field, a service request row or an admin field may declare: every type
+   * except an option-less choice type and a system-only type.
+   */
   requestableTypes(): string[] {
-    return this.types().filter((t) => !this.isOptionLessChoice(t));
+    return this.types().filter((t) => !this.isOptionLessChoice(t) && !this.resolve(t).system_only);
   }
 
-  /** The requestable set plus the option-less choice types a flow element supplies options for. */
+  /**
+   * The requestable set plus the option-less choice types a flow element supplies options for. A
+   * system-only type is in neither half.
+   */
   flowTypes(): string[] {
-    return [...this.requestableTypes(), ...this.types().filter((t) => this.isOptionLessChoice(t))];
+    return [
+      ...this.requestableTypes(),
+      ...this.types().filter((t) => this.isOptionLessChoice(t) && !this.resolve(t).system_only),
+    ];
   }
 
   /**
